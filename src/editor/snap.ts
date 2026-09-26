@@ -12,12 +12,12 @@ export interface Guide {
   y2: number;
 }
 
-export interface SnapResult {
+export interface SnapResult<R extends Rect = Rect> {
   dx: number;
   dy: number;
   guides: Guide[];
   /** Объекты, к которым прилипли, — их подсвечиваем, чтобы было видно, с чем выровнялось. */
-  targets: Rect[];
+  targets: R[];
 }
 
 const xOf = (r: Rect, e: XEdge) => (e === 'l' ? r.x : e === 'c' ? r.x + r.w / 2 : r.x + r.w);
@@ -27,7 +27,7 @@ const yOf = (r: Rect, e: YEdge) => (e === 't' ? r.y : e === 'm' ? r.y + r.h / 2 
  * Насколько сдвинуть прямоугольник `r`, чтобы его края `xs`/`ys` совпали с краями соседей
  * (если ближе `tol`), иначе — с сеткой шага `grid`. Возвращает и направляющие для показа.
  */
-export function snapRect(r: Rect, others: Rect[], tol: number, grid: number, xs: XEdge[], ys: YEdge[]): SnapResult {
+export function snapRect<R extends Rect>(r: Rect, others: R[], tol: number, grid: number, xs: XEdge[], ys: YEdge[]): SnapResult<R> {
   let bestX: { d: number; value: number; edge: XEdge } | null = null;
   let bestY: { d: number; value: number; edge: YEdge } | null = null;
   for (const o of others) {
@@ -53,7 +53,7 @@ export function snapRect(r: Rect, others: Rect[], tol: number, grid: number, xs:
   // Направляющие: вертикальная — через всех соседей на этой линии, горизонтальная — так же.
   const moved = { x: r.x + dx, y: r.y + dy, w: r.w, h: r.h };
   const guides: Guide[] = [];
-  const targets = new Set<Rect>();
+  const targets = new Set<R>();
   if (bestX) {
     const x = bestX.value;
     let y1 = moved.y, y2 = moved.y + moved.h;

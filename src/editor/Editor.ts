@@ -130,6 +130,9 @@ export interface EditorUi {
   smart: boolean;
 }
 
+/** Объект, с которым можно выровняться: его рамка и id (для подписи у края экрана). */
+type SnapTarget = Rect & { id: string };
+
 /** Больше стольких объектов для привязки не берём — ближайших хватает. */
 const SNAP_MAX = 1500;
 
@@ -199,8 +202,8 @@ export class Editor {
   private spaceDown = false;
   /** Направляющие привязки, которые сейчас видны (во время перетаскивания или изменения размера). */
   private guides: Guide[] = [];
-  /** Объекты, к которым сейчас прилипает перетаскиваемое, — подсвечиваются. */
-  private snapHits: Rect[] = [];
+  /** Объекты, к которым сейчас прилипает перетаскиваемое, — подсвечиваются; за краем экрана — плашкой у края. */
+  private snapHits: SnapTarget[] = [];
   /** Последний рисунок: штрихи, нарисованные подряд и рядом, добавляются в него, а не плодят объекты. */
   private lastDrawing: { id: string; time: number } | null = null;
   private readonly cleanup: (() => void)[] = [];
@@ -724,6 +727,72 @@ export class Editor {
     return unionRect(rects);
   }
 
+  /** Плашки у края экрана — для объектов, к которым прилипли, но которые не видно. */
+  private edgeLayer: HTMLDivElement | null = null;
+
+  private paintSnapEdges(): void {
+    const { w, h } = this.view.screen;
+    const off = this.snapHits.filter((r) => {
+      const s = this.toScreenRect(r);
+      return s.x + s.w < 0 || s.x > w || s.y + s.h < 0 || s.y > h;
+    });
+    if (!off.length) {
+      if (this.edgeLayer?.childElementCount) this.edgeLayer.replaceChildren();
+      return;
+    }
+    if (!this.edgeLayer) {
+      const layer = document.createElement('div');
+      layer.className = 'snap-edges';
+      this.host.appendChild(layer);
+      this.edgeLayer = layer;
+      this.cleanup.push(() => layer.remove());
+    }
+    const pad = 10;
+    const chips = off.map((r) => {
+      const s = this.toScreenRect(r);
+      const cx = s.x + s.w / 2, cy = s.y + s.h / 2;
+      const el = document.createElement('div');
+      el.className = 'snap-edge';
+      // С какой стороны экрана объект: стрелка показывает, куда он уехал.
+      let arrow: string;
+      if (cx > w || cx < 0) {
+        const right = cx > w;
+        arrow = right ? '→' : '←';
+        el.style.top = `${Math.max(pad, Math.min(h - 30, cy - 12))}px`;
+        if (right) el.style.right = `${pad}px`;
+        else el.style.left = `${pad}px`;
+      } else {
+        const down = cy > h;
+        arrow = down ? '↓' : '↑';
+        el.style.left = `${Math.max(pad, Math.min(w - 160, cx))}px`;
+        el.style.transform = 'translateX(-50%)';
+        if (down) el.style.bottom = `${pad}px`;
+        else el.style.top = `${pad}px`;
+      }
+      const label = this.snapLabel(r.id);
+      // Текст — через textContent: подпись берётся из содержимого объекта и разметкой стать не должна.
+      el.textContent = arrow === '←' || arrow === '↑' ? `${arrow} ${label}` : `${label} ${arrow}`;
+      return el;
+    });
+    this.edgeLayer.replaceChildren(...chips);
+  }
+
+  /** Короткая подпись объекта для плашки у края: его текст, имя файла или вид. */
+  private snapLabel(id: string): string {
+    const item = this.store.get(id);
+    if (!item || isLine(item)) return '';
+    const short = (s: string) => {
+      const line = s.replace(/[*_`#>=~[\]]/g, '').trim().split('\n')[0].trim();
+      return line.length > 28 ? `${line.slice(0, 27)}…` : line;
+    };
+    if (item.kind === 'image') return 'фото';
+    if (item.kind === 'doc' || item.kind === 'file') return `📄 ${item.file.split('/').pop()!.replace(/\.md$/i, '')}`;
+    if (item.kind === 'link') return short(item.title ?? item.url);
+    if (item.kind === 'frame') return short(item.title ?? 'рамка');
+    if ('text' in item && item.text) return short(item.text);
+    return item.kind === 'shape' ? 'фигура' : item.kind === 'sticky' ? 'стикер' : 'объект';
+  }
+
   private toScreenRect(r: Rect): Rect {
     const a = this.view.worldToScreen(r.x, r.y);
     const z = this.view.cam.zoom;
@@ -857,18 +926,32 @@ export class Editor {
    * С чем выравнивать: всё, что видно на экране (как в Miro — год слева видит год справа через весь экран),
    * плюс немного вокруг. Если объектов тысячи — берём ближайшие, чтобы привязка не тормозила.
    */
-  private snapTargets(area: Rect, exclude: Set<string>): Rect[] {
+  private snapTargets(area: Rect, exclude: Set<string>): SnapTarget[] {
     const a = this.view.screenToWorld(0, 0);
     const { w, h } = this.view.screen;
     const b = this.view.screenToWorld(w, h);
     const x0 = Math.min(a.x, area.x), y0 = Math.min(a.y, area.y);
     const x1 = Math.max(b.x, area.x + area.w), y1 = Math.max(b.y, area.y + area.h);
     const cx = area.x + area.w / 2, cy = area.y + area.h / 2;
-    const rects = this.view
-      .search({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, true)
-      .filter((i) => !isLine(i) && !exclude.has(i.id) && i.kind !== 'drawing')
-      .map((i) => this.view.rectOf(i.id)!)
-      .filter(Boolean);
+    // Кроме экрана — вся строка и весь столбец доски, где стоит объект: выровняться можно и с тем,
+    // что уехало за край (любой край или центр такого объекта попадает в эту полосу).
+    const tol = 8 / this.view.cam.zoom;
+    const all = this.view.boardBounds;
+    const zones: Rect[] = [
+      { x: x0, y: y0, w: x1 - x0, h: y1 - y0 },
+      { x: all.x, y: area.y - tol, w: all.w, h: area.h + tol * 2 },
+      { x: area.x - tol, y: all.y, w: area.w + tol * 2, h: all.h },
+    ];
+    const seen = new Set<string>();
+    const rects: SnapTarget[] = [];
+    for (const zone of zones) {
+      for (const i of this.view.search(zone, true)) {
+        if (seen.has(i.id) || isLine(i) || exclude.has(i.id) || i.kind === 'drawing') continue;
+        seen.add(i.id);
+        const r = this.view.rectOf(i.id);
+        if (r) rects.push({ ...r, id: i.id });
+      }
+    }
     if (rects.length <= SNAP_MAX) return rects;
     const dist = (r: Rect) => Math.hypot(r.x + r.w / 2 - cx, r.y + r.h / 2 - cy);
     return rects.sort((p, q) => dist(p) - dist(q)).slice(0, SNAP_MAX);
@@ -2200,6 +2283,7 @@ export class Editor {
       const s = this.toScreenRect(r);
       g.roundRect(s.x - 3, s.y - 3, s.w + 6, s.h + 6, 4).fill({ color: 0xff3d8b, alpha: 0.08 }).stroke({ width: 1.5, color: 0xff3d8b, alpha: 0.7 });
     }
+    this.paintSnapEdges();
     for (const gd of this.guides) {
       const a = this.view.worldToScreen(gd.x1, gd.y1), b = this.view.worldToScreen(gd.x2, gd.y2);
       g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ width: 1, color: 0xff3d8b });
