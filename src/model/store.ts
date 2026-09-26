@@ -9,10 +9,14 @@
 import type { BoardDoc, Item } from './types.ts';
 import { isLine } from './types.ts';
 
+/** Свойства всей доски, которые меняются через историю (их правки отменяются как всё остальное). */
+export type DocProp = 'styles' | 'background';
+
 export type Op =
   | { t: 'insert'; index: number; item: Item }
   | { t: 'delete'; index: number; item: Item }
-  | { t: 'replace'; index: number; before: Item; after: Item };
+  | { t: 'replace'; index: number; before: Item; after: Item }
+  | { t: 'prop'; key: DocProp; before: unknown; after: unknown };
 
 export interface Tx {
   label: string;
@@ -27,10 +31,12 @@ export function invert(op: Op): Op {
     case 'insert': return { t: 'delete', index: op.index, item: op.item };
     case 'delete': return { t: 'insert', index: op.index, item: op.item };
     case 'replace': return { t: 'replace', index: op.index, before: op.after, after: op.before };
+    case 'prop': return { t: 'prop', key: op.key, before: op.after, after: op.before };
   }
 }
 
 function opId(op: Op): string {
+  if (op.t === 'prop') return `prop:${op.key}`;
   return op.t === 'replace' ? op.after.id : op.item.id;
 }
 
@@ -58,6 +64,13 @@ function mergeOps(ops: Op[]): Op[] {
       lastInsert.set(id, copy);
       lastReplace.delete(id);
       out.push(copy);
+      continue;
+    }
+    if (op.t === 'prop') {
+      // Несколько правок одного свойства доски за жест — одна запись: было в начале, стало в конце.
+      const prev = out.find((o): o is Extract<Op, { t: 'prop' }> => o.t === 'prop' && o.key === op.key);
+      if (prev) prev.after = op.after;
+      else out.push({ ...op });
       continue;
     }
     if (op.t === 'replace') {
@@ -197,6 +210,13 @@ export class BoardStore {
     this.run({ t: 'replace', index: this.indexOf(id), before, after });
   }
 
+  /** Поменять свойство всей доски (стили, фон). `undefined` — убрать свойство. */
+  setProp(key: DocProp, value: unknown): void {
+    const before = this.doc[key];
+    if (JSON.stringify(before) === JSON.stringify(value)) return;
+    this.run({ t: 'prop', key, before, after: value });
+  }
+
   /** Переставить объект в порядке слоёв (на передний / задний план). */
   moveToIndex(id: string, index: number): void {
     const item = this.byId.get(id);
@@ -317,6 +337,10 @@ export class BoardStore {
         this.byId.delete(op.item.id);
         this.unlink(op.item);
         this.positionDirty = true;
+        break;
+      case 'prop':
+        if (op.after === undefined) delete this.doc[op.key];
+        else (this.doc as Record<string, unknown>)[op.key] = op.after;
         break;
       case 'replace':
         items[op.index] = op.after;

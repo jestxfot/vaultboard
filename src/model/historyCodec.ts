@@ -4,7 +4,7 @@
 // пишутся лишь изменившиеся поля (было/стало), целиком объект пишется только при создании и удалении.
 // Полные «до» и «после» восстанавливаются при загрузке: идём от текущего состояния доски назад по журналу.
 import type { Item } from './types.ts';
-import type { Op, Tx } from './store.ts';
+import type { DocProp, Op, Tx } from './store.ts';
 
 /** Изменившиеся поля объекта. `null` — поля нет. */
 type Patch = Record<string, unknown>;
@@ -12,7 +12,8 @@ type Patch = Record<string, unknown>;
 export type CompactOp =
   | { i: number; n: Item }                       // вставка
   | { x: number; n: Item }                       // удаление
-  | { p: number; id: string; b: Patch; a: Patch }; // замена
+  | { p: number; id: string; b: Patch; a: Patch } // замена
+  | { k: DocProp; b: unknown; a: unknown };       // свойство доски (стили, фон)
 
 export type LogLine =
   | { v: 1; start: number }                       // начало журнала: версия доски, с которой он ведётся
@@ -49,6 +50,7 @@ export function encodeOps(ops: Op[]): CompactOp[] {
   return ops.map((op) => {
     if (op.t === 'insert') return { i: op.index, n: op.item };
     if (op.t === 'delete') return { x: op.index, n: op.item };
+    if (op.t === 'prop') return { k: op.key, b: op.before ?? null, a: op.after ?? null };
     return { p: op.index, id: op.after.id, ...diffItems(op.before, op.after) };
   });
 }
@@ -117,7 +119,9 @@ export function rebuildHistory(items: readonly Item[], log: LogLine[], currentRe
       const o = undo[t].o;
       for (let k = o.length - 1; k >= 0; k--) {
         const c = o[k];
-        if ('i' in c) {
+        if ('k' in c) {
+          full.push({ t: 'prop', key: c.k, before: c.b ?? undefined, after: c.a ?? undefined });
+        } else if ('i' in c) {
           check(scratch[c.i]?.id === c.n.id);
           full.push({ t: 'insert', index: c.i, item: scratch[c.i] });
           scratch.splice(c.i, 1);
@@ -141,7 +145,9 @@ export function rebuildHistory(items: readonly Item[], log: LogLine[], currentRe
     for (let t = redo.length - 1; t >= 0; t--) {
       const full: Op[] = [];
       for (const c of redo[t].o) {
-        if ('i' in c) {
+        if ('k' in c) {
+          full.push({ t: 'prop', key: c.k, before: c.b ?? undefined, after: c.a ?? undefined });
+        } else if ('i' in c) {
           scratch.splice(c.i, 0, c.n);
           full.push({ t: 'insert', index: c.i, item: c.n });
         } else if ('x' in c) {

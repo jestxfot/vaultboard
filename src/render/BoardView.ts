@@ -11,7 +11,9 @@
 // - правки применяются точечно: меняется только тронутый объект и прицепленные к нему линии.
 import { Application, Container, Graphics, HTMLText, Sprite, Text, Texture, TilingSprite } from 'pixi.js';
 import RBush from 'rbush';
-import type { BoardDoc, BoxItem, DocItem, ImageItem, Item, LineItem } from '../model/types.ts';
+import type { Background, BoardDoc, BoxItem, DocItem, ImageItem, Item, LineItem } from '../model/types.ts';
+import { resolveLook } from '../model/look.ts';
+import { hexToNum, isDark } from '../format/colors.ts';
 import type { DocCache } from '../io/files.ts';
 import type { Markdown } from '../format/markdown.ts';
 import { BoardPaths } from '../model/paths.ts';
@@ -20,7 +22,7 @@ import type { Op } from '../model/store.ts';
 import type { PerfMonitor } from '../perf/monitor.ts';
 import { drawBox, drawLine, farColor, FONT, labelSpec, type LabelSpec, makeLabel } from './draw.ts';
 import { ImageCache, type Level } from './images.ts';
-import { endpointCenter, geomBounds, type LineGeom, lineGeometry, lineMidpoint, type Rect, resolveAnchor } from './geometry.ts';
+import { endpointCenter, geomBounds, type LineGeom, lineGeometry, lineMidpoint, type Rect, resolveAnchor, samplePath } from './geometry.ts';
 
 export interface Camera {
   /** Где на экране (в CSS-пикселях) находится точка доски (0,0). */
@@ -61,8 +63,17 @@ const NEAR_BUILDS_PER_FRAME = 40;
 const LABELS_PER_FRAME = 12;
 /** Объект рисуется полноценно, когда его меньшая сторона на экране не меньше стольких пикселей. */
 const NEAR_PX = 28;
-/** Линии тоньше пикселя не видны — ниже этого масштаба их не рисуем. */
-const LINE_MIN_ZOOM = 0.12;
+/**
+ * Линия издалека не исчезает: на экране она не тоньше стольких пикселей, как в Miro.
+ * Толщина подстраивается ступенями масштаба (×2) и только когда камера остановилась.
+ */
+const LINE_MIN_PX = 1.5;
+/**
+ * Ниже этого масштаба все линии рисуются одним общим графическим объектом упрощённой формы:
+ * стрелки и пунктир отсюда всё равно не различить, а полторы тысячи отдельных объектов стоили бы
+ * процессору ~10 мс на каждый кадр. Один общий объект строится, когда камера остановилась.
+ */
+const FAR_LINES_ZOOM = 0.25;
 const LINE_LABEL_FONT = 14;
 /** Экранный размер шрифта, ниже которого текст не рисуем. */
 const MIN_TEXT_PX = 5.5;
@@ -92,6 +103,8 @@ class ItemView {
   title: Text | null = null;
   /** Само фото (для объектов-картинок), когда загружен хоть один уровень. */
   photo: Sprite | null = null;
+  /** Ступень масштаба, под которую построена линия (её видимая толщина). */
+  lineStep = 0;
   /** Текст документа на карточке (отформатированный markdown). */
   body: HTMLText | null = null;
   bodyRes = 0;
@@ -100,7 +113,7 @@ class ItemView {
     this.item = item;
     this.container.visible = false;
     if (!isLine(item)) this.container.position.set(item.x, item.y);
-    this.spec = isLine(item) ? null : labelSpec(item);
+    this.spec = null;
   }
 }
 
@@ -149,12 +162,19 @@ export class BoardView {
 
   private readonly host: HTMLElement;
   private readonly perf: PerfMonitor;
+  /** Открытая доска — отсюда берутся её стили и фон (хранилище меняет их на месте). */
+  private doc: BoardDoc | null = null;
+  private gridKind = '';
   /** Файл (фото или заметка) → объекты доски, которые его показывают. */
   private readonly fileViews = new Map<string, Set<ItemView>>();
   /** Камера сейчас движется — оригиналы фото не грузим, пока не остановится. */
   private moving = false;
   private readonly world = new Container({ isRenderGroup: true });
   private readonly overlay = new Graphics();
+  /** Все линии одним объектом — для вида издалека. */
+  private farLines: Graphics | null = null;
+  private farLinesStep = 0;
+  private farLinesDirty = true;
   private grid!: TilingSprite;
   private readonly rects = new Map<string, Rect>();
   private readonly views = new Map<string, ItemView>();
@@ -247,6 +267,9 @@ export class BoardView {
   // ---------- загрузка и правки ----------
 
   load(doc: BoardDoc, fit = true): void {
+    this.doc = doc;
+    this.farLines = null;
+    this.applyBackground(doc.background);
     for (const child of this.world.removeChildren()) child.destroy({ children: true });
     this.rects.clear();
     this.views.clear();
@@ -274,6 +297,7 @@ export class BoardView {
     }
     this.index.load(entries);
     this.boundsDirty = true;
+    this.farLinesDirty = true;
     if (fit) this.fitAll();
     else this.cameraMoved();
   }
@@ -281,7 +305,13 @@ export class BoardView {
   /** Применить правки хранилища. Порядок операций тот же, что в хранилище. */
   apply(ops: Op[]): void {
     const touched = new Set<string>();
+    let stylesChanged = false;
     for (const op of ops) {
+      if (op.t === 'prop') {
+        if (op.key === 'styles') stylesChanged = true;
+        if (op.key === 'background') this.applyBackground(this.doc?.background);
+        continue;
+      }
       if (op.t === 'insert') {
         const v = this.newView(op.item);
         this.world.addChildAt(v.container, op.index);
@@ -313,6 +343,19 @@ export class BoardView {
       }
     }
 
+    // Стиль поменялся — перестраиваем все объекты с каким-либо стилем на том же месте в порядке слоёв.
+    if (stylesChanged) {
+      for (const old of [...this.views.values()]) {
+        if (!old.item.style) continue;
+        const at = this.world.getChildIndex(old.container);
+        const item = old.item;
+        this.destroyView(old);
+        const v = this.newView(item);
+        this.world.addChildAt(v.container, at);
+        touched.add(item.id);
+      }
+    }
+
     // Линии, прицепленные к тронутым объектам, тоже надо перерисовать.
     const lines = new Set<string>();
     for (const id of touched) {
@@ -333,6 +376,7 @@ export class BoardView {
         this.labelCount--;
       }
     }
+    if (lines.size) this.farLinesDirty = true;
     // Немного правок — переставляем объекты в индексе по одному. Много (выделили всё и тащат) —
     // быстрее пересобрать индекс целиком одной пачкой.
     if (touched.size + lines.size > 300) {
@@ -384,8 +428,14 @@ export class BoardView {
     v.body = null;
   }
 
+  /** Объект со стилем доски: так он и рисуется. */
+  look<T extends Item>(item: T): T {
+    return resolveLook(item, this.doc?.styles);
+  }
+
   private newView(item: Item): ItemView {
     const v = new ItemView(item);
+    v.spec = isLine(item) ? null : labelSpec(this.look(item));
     this.views.set(item.id, v);
     if (item.kind === 'image' || item.kind === 'doc') {
       const file = this.paths.toVault(item.file);
@@ -477,12 +527,32 @@ export class BoardView {
     if (!ca || !cb) return null;
     const a = resolveAnchor(item.from, cb, rectOf);
     const b = resolveAnchor(item.to, ca, rectOf);
-    return a && b ? lineGeometry(a, b, item.path ?? 'curve') : null;
+    return a && b ? lineGeometry(a, b, this.look(item).path ?? 'curve') : null;
   }
 
   private lineBounds(item: LineItem): Rect | null {
     const g = this.lineGeom(item);
     return g ? geomBounds(g, 20) : null;
+  }
+
+  // ---------- фон ----------
+
+  /** Фон доски: цвет и сетка (точки, клетка или ничего), как в Miro. На тёмном фоне сетка светлее. */
+  private applyBackground(bg: Background | undefined): void {
+    const color = bg?.color ?? '#f7f7f5';
+    const grid = bg?.grid ?? 'dots';
+    this.app.renderer.background.color = color;
+    const ink = isDark(color) ? '#4a4a48' : '#cfcfcb';
+    const key = `${grid}:${ink}`;
+    if (key !== this.gridKind && this.grid) {
+      this.gridKind = key;
+      const old = this.grid.texture;
+      this.grid.texture = gridTexture(grid, ink);
+      if (old !== Texture.WHITE) old.destroy(true);
+    }
+    if (this.grid) this.grid.visible = grid !== 'none';
+    this.camDirty = true;
+    this.requestFrame();
   }
 
   // ---------- камера ----------
@@ -579,6 +649,9 @@ export class BoardView {
 
   private applyCamera(): void {
     const { x, y, zoom } = this.cam;
+    if (this.farLines) this.farLines.visible = zoom < FAR_LINES_ZOOM;
+    // Первый раз ушли в даль — общий объект нужен сразу, не дожидаясь остановки камеры.
+    if (zoom < FAR_LINES_ZOOM && !this.farLines) this.updateFarLines();
     this.world.position.set(x, y);
     this.world.scale.set(zoom);
 
@@ -620,10 +693,19 @@ export class BoardView {
     const item = v.item;
 
     if (isLine(item)) {
-      const want = zoom >= LINE_MIN_ZOOM;
-      if (v.gfx) v.gfx.visible = want;
-      else if (want) this.nearQueue.set(v, () => this.buildNear(v));
-      if (v.label) v.label.visible = want && LINE_LABEL_FONT * zoom >= MIN_TEXT_PX && item.id !== this.editingId;
+      if (zoom < FAR_LINES_ZOOM) {
+        // Издалека линию показывает общий объект, а свой прячем.
+        if (v.gfx) v.gfx.visible = false;
+        if (v.label) v.label.visible = false;
+        return;
+      }
+      if (v.gfx) v.gfx.visible = true;
+      if (!v.gfx) this.nearQueue.set(v, () => this.buildNear(v));
+      else if (!this.moving && v.lineStep !== lineStep(zoom)) {
+        // Масштаб ушёл на другую ступень — перестроить линию с новой видимой толщиной (порциями, в очереди).
+        this.nearQueue.set(v, () => this.rebuildLine(v));
+      }
+      if (v.label) v.label.visible = LINE_LABEL_FONT * zoom >= MIN_TEXT_PX && item.id !== this.editingId;
       return;
     }
 
@@ -699,7 +781,7 @@ export class BoardView {
     const s = new Sprite(Texture.WHITE);
     s.width = item.w;
     s.height = item.h;
-    s.tint = farColor(item);
+    s.tint = farColor(this.look(item));
     v.far = s;
     v.container.addChildAt(s, 0);
   }
@@ -711,17 +793,64 @@ export class BoardView {
     if (isLine(item)) {
       const geom = this.lineGeom(item);
       if (geom) {
-        drawLine(g, item, geom);
+        const look = this.look(item);
+        const step = lineStep(this.cam.zoom);
+        v.lineStep = step;
+        drawLine(g, { ...look, width: Math.max(look.width ?? 2, LINE_MIN_PX / step) }, geom);
         if (item.label) this.buildLineLabel(v, g, item.label, lineMidpoint(geom));
       }
     } else {
-      drawBox(g, item);
+      drawBox(g, this.look(item));
     }
     v.gfx = g;
     // Ближний вид — над дальним, но под текстом и заголовком.
     v.container.addChildAt(g, v.far ? 1 : 0);
     this.nearCount++;
     this.updateDetail(v);
+  }
+
+  private rebuildLine(v: ItemView): void {
+    if (!this.visible.has(v) || !v.gfx) return;
+    v.gfx.destroy();
+    v.gfx = null;
+    this.nearCount--;
+    if (v.label) {
+      v.label.destroy();
+      v.label = null;
+      this.labelCount--;
+    }
+    this.buildNear(v);
+  }
+
+  /** Все линии доски одним объектом: упрощённая форма, видимая толщина не меньше LINE_MIN_PX. */
+  private updateFarLines(): void {
+    const zoom = this.cam.zoom;
+    if (zoom >= FAR_LINES_ZOOM) return;
+    const step = lineStep(zoom);
+    if (this.farLines && !this.farLinesDirty && this.farLinesStep === step) return;
+    const g = this.farLines ?? new Graphics();
+    g.clear();
+    const minWidth = LINE_MIN_PX / step;
+    for (const v of this.views.values()) {
+      if (!isLine(v.item)) continue;
+      const geom = this.lineGeom(v.item);
+      if (!geom) continue;
+      const look = this.look(v.item);
+      const pts = samplePath(geom, 8);
+      g.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+      g.stroke({ width: Math.max(look.width ?? 2, minWidth), color: look.color ? hexToNum(look.color) : 0x5b5b5b });
+    }
+    if (!this.farLines) {
+      this.farLines = g;
+      this.world.addChild(g);
+    } else {
+      // Держим общий объект поверх объектов доски.
+      this.world.addChild(g);
+    }
+    this.farLines.visible = zoom < FAR_LINES_ZOOM;
+    this.farLinesStep = step;
+    this.farLinesDirty = false;
   }
 
   /** Подпись на линии: белая плашка посередине пути, чтобы линия не перечёркивала текст. */
@@ -818,9 +947,15 @@ export class BoardView {
   /** Камера остановилась: дорисовать тексты в нужном разрешении и освободить память от далёких. */
   private settle(): void {
     this.moving = false;
+    this.updateFarLines();
     // Камера остановилась — теперь можно грузить оригиналы фото, которые видны крупно.
     const photosInUse = new Set<string>();
     for (const v of this.visible) {
+      // Линии — подогнать видимую толщину под новый масштаб.
+      if (isLine(v.item)) {
+        this.updateDetail(v);
+        continue;
+      }
       if (v.item.kind !== 'image') continue;
       photosInUse.add(this.paths.toVault(v.item.file));
       this.updateDetail(v);
@@ -888,6 +1023,31 @@ export class BoardView {
     this.resizeObserver?.disconnect();
     this.app.destroy(true, { children: true });
   }
+}
+
+/** Одна клетка сетки: точка в центре или линии по краю (из соседних клеток складывается клетчатая сетка). */
+function gridTexture(kind: string, ink: string): Texture {
+  const size = 32;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d')!;
+  ctx.fillStyle = ink;
+  ctx.strokeStyle = ink;
+  if (kind === 'lines') {
+    ctx.globalAlpha = 0.7;
+    ctx.fillRect(0, 0, size, 1);
+    ctx.fillRect(0, 0, 1, size);
+  } else {
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, 1.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return Texture.from(c);
+}
+
+/** Ступень масштаба для толщины линий: 1 вблизи, дальше 1/2, 1/4, 1/8… */
+function lineStep(zoom: number): number {
+  return zoom >= 1 ? 1 : Math.pow(2, Math.floor(Math.log2(zoom)));
 }
 
 function dotTexture(): Texture {
