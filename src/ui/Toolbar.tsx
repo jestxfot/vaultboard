@@ -3,7 +3,7 @@ import { createSignal, For, type JSX, Show } from 'solid-js';
 import type { Editor, EditorUi } from '../editor/Editor.ts';
 import type { PathKind, ShapeKind } from '../model/types.ts';
 import { STICKY_PALETTE } from '../format/colors.ts';
-import { IconDoc, IconFrame, IconPen, IconPhoto, IconRedo, IconSelect, IconShapes, IconSticky, IconText, IconUndo } from './icons.tsx';
+import { IconComment, IconDoc, IconFrame, IconPen, IconPhoto, IconRedo, IconSelect, IconShapes, IconSticky, IconText, IconUndo } from './icons.tsx';
 
 type Menu = 'sticky' | 'shapes' | 'draw' | null;
 
@@ -77,6 +77,9 @@ export function Toolbar(props: { editor: Editor; ui: EditorUi; onPhoto: () => vo
         </ToolButton>
         <ToolButton title="Рамка (F)" active={props.ui.tool === 'frame'} onClick={() => pick(() => props.editor.setTool('frame'))}>
           <IconFrame />
+        </ToolButton>
+        <ToolButton title="Комментарий (C): щёлкни по доске или по объекту. Список — Shift+C" active={props.ui.tool === 'comment'} onClick={() => pick(() => props.editor.setTool('comment'))}>
+          <IconComment />
         </ToolButton>
         <ToolButton title="Фото и файлы (можно и Ctrl+V, и перетащить из проводника) — кладутся в папку доски без сжатия" onClick={() => pick(props.onPhoto)}>
           <IconPhoto />

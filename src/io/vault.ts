@@ -111,9 +111,9 @@ export const vault = {
   /** Хранилища Obsidian на этом компьютере; null — Obsidian не установлен. */
   obsidianVaults: () => request<{ root: string; vaults: string[] | null }>('/api/obsidian-vaults'),
 
-  getSettings: () => request<{ proxy?: string }>('/api/settings'),
+  getSettings: () => request<{ proxy?: string; author?: string; defaultAuthor?: string }>('/api/settings'),
 
-  async putSettings(settings: { proxy?: string }): Promise<void> {
+  async putSettings(settings: { proxy?: string; author?: string }): Promise<void> {
     const res = await fetch('/api/settings', { method: 'PUT', body: JSON.stringify(settings) });
     if (!res.ok) throw new Error('Не удалось сохранить настройки — проверь адрес прокси');
   },

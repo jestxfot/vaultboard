@@ -133,6 +133,8 @@ export interface LayerDef {
   locked?: boolean;
 }
 
+export type PinShape = 'bubble' | 'circle' | 'square' | 'diamond' | 'triangle' | 'star' | 'flag' | 'heart';
+
 export interface CommentMessage {
   id: string;
   author: string;
@@ -141,6 +143,8 @@ export interface CommentMessage {
   text: string;
   /** Когда правили, если правили. */
   edited?: string;
+  /** На какое сообщение это ответ — обсуждение ветвится деревом. Нет поля — ответ на всё обсуждение. */
+  parent?: string;
   /** Реакция → кто её поставил. */
   reactions?: Record<string, string[]>;
 }
@@ -159,6 +163,8 @@ export interface CommentThread {
   fy?: number;
   /** Цвет булавки `#rrggbb`. Нет — цвет статуса. */
   color?: string;
+  /** Форма булавки. Нет — форма статуса. */
+  shape?: PinShape;
   /** Статус обсуждения (см. model/comments.ts). Нет поля — «открыто». */
   status?: string;
   messages: CommentMessage[];

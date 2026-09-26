@@ -26,3 +26,4 @@ export const IconArrowEnd = () => <Svg><path d="M4 10h12M12 6l4 4-4 4" /></Svg>;
 export const IconPhoto = () => <Svg><rect x="3" y="4" width="14" height="12" rx="1.5" /><circle cx="7.5" cy="8.5" r="1.5" /><path d="M3 14l4-4 3 3 2-2 5 5" /></Svg>;
 export const IconDoc = () => <Svg><path d="M5 3h7l3 3v11H5z" /><path d="M12 3v3h3M8 10h5M8 13h5" /></Svg>;
 export const IconPen = () => <Svg><path d="M4 16l1-4 8-8 3 3-8 8z" /><path d="M11 6l3 3" /></Svg>;
+export const IconComment = () => <Svg><path d="M4 16V9a6 6 0 1 1 6 6H4Z" /><path d="M8 8h5M8 11h3" /></Svg>;

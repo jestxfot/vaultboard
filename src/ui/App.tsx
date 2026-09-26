@@ -23,6 +23,11 @@ import { LayersPanel } from './LayersPanel.tsx';
 import { HelpDialog } from './HelpDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
 import { EmbedLayer } from './EmbedLayer.ts';
+import { CommentsLayer } from './CommentsLayer.ts';
+import { ThreadPopover } from './ThreadPopover.tsx';
+import { CommentsPanel } from './CommentsPanel.tsx';
+import { Comments } from '../editor/Comments.ts';
+import { isDone, STATUSES } from '../model/comments.ts';
 import { embedUrl } from '../format/embed.ts';
 import { exportBoard, type ExportFormat, saveBlob } from '../render/export.ts';
 import type { Background, GridKind, StyleDef } from '../model/types.ts';
@@ -51,6 +56,9 @@ interface Opened {
   editor: Editor;
   /** Живые плееры видео поверх карточек. */
   embeds: EmbedLayer;
+  comments: Comments;
+  /** Булавки обсуждений поверх доски. */
+  pins: CommentsLayer;
   session: BoardSession | null;
   off: () => void;
 }
@@ -159,6 +167,13 @@ export function App() {
   const [exporting, setExporting] = createSignal<{ area: 'board' | 'selection'; selection: Rect | null } | null>(null);
   const [stylesOpen, setStylesOpen] = createSignal(false);
   const [layersOpen, setLayersOpen] = createSignal(false);
+  // Комментарии: открытое обсуждение, новое (точка на доске), список, «скрыть завершённые», имя автора.
+  const [openThread, setOpenThread] = createSignal<string | null>(null);
+  const [draft, setDraft] = createSignal<{ x: number; y: number } | null>(null);
+  const [commentsOpen, setCommentsOpen] = createSignal(false);
+  const [hideDone, setHideDoneSignal] = createSignal(readFlag('vaultboard:show-done') ? false : true);
+  const [author, setAuthor] = createSignal('Я');
+  void vault.getSettings().then((s) => setAuthor(s.author || s.defaultAuthor || 'Я'), () => undefined);
   const [library, setLibrary] = createSignal<Record<string, StyleDef>>({});
   let filePicker!: HTMLInputElement;
 
@@ -372,6 +387,54 @@ export function App() {
     ];
   }
 
+  function setHideDone(hide: boolean) {
+    setHideDoneSignal(hide);
+    writeFlag('vaultboard:show-done', !hide);
+    if (opened) {
+      opened.pins.hideDone = hide;
+      opened.pins.update();
+    }
+  }
+
+  function closeThread() {
+    setOpenThread(null);
+    setDraft(null);
+    if (opened) {
+      opened.pins.openId = null;
+      opened.pins.update();
+    }
+  }
+
+  /** Открыть обсуждение; `fly` — перелететь к булавке (из списка). */
+  function showThread(id: string, fly = false) {
+    if (!opened) return;
+    setDraft(null);
+    setOpenThread(id);
+    opened.pins.openId = id;
+    const t = opened.comments.get(id);
+    if (fly && t) {
+      const v = view()!;
+      const p = opened.comments.point(t);
+      const zoom = Math.max(v.cam.zoom, 0.6);
+      v.setCamera({ zoom, x: v.screen.w / 2 - p.x * zoom - 150, y: v.screen.h / 2 - p.y * zoom });
+    }
+    opened.pins.update();
+  }
+
+  /** Меню по булавке: статус, удалить. */
+  function pinMenu(id: string): MenuEntry[] {
+    const c = opened!.comments;
+    const t = c.get(id);
+    if (!t) return [];
+    return [
+      { label: 'Открыть', action: () => showThread(id) },
+      'sep',
+      ...STATUSES.map((s): MenuEntry => ({ label: s.name, swatch: s.color, checked: (t.status ?? 'open') === s.id, action: () => c.setStatus(id, s.id) })),
+      'sep',
+      { label: 'Удалить обсуждение', danger: true, action: () => { if (window.confirm('Удалить обсуждение целиком?')) c.remove(id); } },
+    ];
+  }
+
   /** Подменю «На слой»: все слои доски и новый слой из выделенного. */
   function layerSubmenu(): MenuEntry[] {
     const ed = opened!.editor;
@@ -452,6 +515,7 @@ export function App() {
         ],
       },
       { label: 'Фото и файлы…', action: () => filePicker.click() },
+      { label: 'Комментарий здесь', hint: 'C', action: () => { setOpenThread(null); setDraft(at); } },
       'sep',
       { label: 'Выделить всё', hint: 'Ctrl+A', action: () => ed.selectAll() },
       { label: 'Показать всю доску', hint: 'Shift+1', action: () => view()!.fitAll() },
@@ -466,6 +530,8 @@ export function App() {
       },
       { label: 'Стили доски…', action: () => setStylesOpen(true) },
       { label: 'Слои…', hint: 'Shift+L', action: () => setLayersOpen(true) },
+      { label: 'Комментарии…', hint: 'Shift+C', action: () => setCommentsOpen(true) },
+      { label: hideDone() ? 'Показать завершённые комментарии' : 'Скрыть завершённые комментарии', action: () => setHideDone(!hideDone()) },
       'sep',
       { label: 'Экспорт доски…', hint: 'PNG, JPG, PDF', action: () => openExport('board') },
     ];
@@ -494,6 +560,9 @@ export function App() {
     opened.session?.close();
     opened.editor.destroy();
     opened.embeds.destroy();
+    opened.pins.destroy();
+    setOpenThread(null);
+    setDraft(null);
     opened.off();
     opened = null;
     setEditor(undefined);
@@ -520,6 +589,7 @@ export function App() {
         uiQueued = false;
         setUi(ed.ui());
         opened?.embeds.update();
+        opened?.pins.update();
       });
     };
     ed.onNotice = flash;
@@ -530,6 +600,13 @@ export function App() {
     ed.onQuickOpen = () => setQuick(true);
     ed.onUnfurl = (id, url) => void unfurlLink(id, url);
     const embeds = new EmbedLayer(host, v, store, () => ed.ui().selection);
+    const comments = new Comments(store, v);
+    const pins = new CommentsLayer(host, v, comments);
+    pins.hideDone = hideDone();
+    pins.onOpen = (id) => showThread(id);
+    pins.onContextMenu = (id, e) => setMenu({ x: e.clientX, y: e.clientY, items: pinMenu(id) });
+    ed.onComment = (at) => { closeThread(); setDraft(at); };
+    ed.onCommentsPanel = () => setCommentsOpen(!commentsOpen());
     ed.onPlayEmbed = (id) => embeds.play(id);
     ed.onLayers = () => setLayersOpen(!layersOpen());
     ed.onContextMenu = (e) => setMenu({ x: e.clientX, y: e.clientY, items: e.target ? objectMenu(e.at) : boardMenu(e.at) });
@@ -537,6 +614,10 @@ export function App() {
       v.apply(ops);
       ed.storeChanged(ops);
       embeds.itemsChanged();
+      pins.update();
+      // Обсуждение удалили (или отменили его создание) — закрыть окно.
+      const open = openThread();
+      if (open && !comments.get(open)) closeThread();
     });
 
     let session: BoardSession | null = null;
@@ -550,7 +631,7 @@ export function App() {
       };
       restored = await session.start();
     }
-    opened = { store, editor: ed, embeds, session, off };
+    opened = { store, editor: ed, embeds, comments, pins, session, off };
     if (import.meta.env.DEV) Object.assign(window, { __store: store, __editor: ed });
     setEditor(ed);
     setUi(ed.ui());
@@ -634,6 +715,7 @@ export function App() {
       setZoom(v.cam.zoom);
       opened?.editor.cameraChanged();
       opened?.embeds.update();
+      opened?.pins.update();
       const path = opened?.session?.path;
       if (path) {
         clearTimeout(cameraTimer);
@@ -641,6 +723,10 @@ export function App() {
       }
     };
     setView(v);
+    // Щелчок по доске мимо окна обсуждения закрывает его, как в Miro (булавки открывают своё сами).
+    host.addEventListener('pointerdown', (e) => {
+      if ((openThread() || draft()) && !(e.target as HTMLElement).closest('.comment-pin')) closeThread();
+    }, true);
     v.setDocs(docs, markdown);
     void files.refresh();
     void vault.getLibrary().then(setLibrary).catch(() => undefined);
@@ -774,6 +860,31 @@ export function App() {
         </Show>
         <div class="corner">
           <Show when={editor() && ui()}>
+            {(() => {
+              const threads = () => (ui(), opened?.comments.threads ?? []);
+              const open = () => threads().filter((t) => !isDone(t)).length;
+              const done = () => threads().length - open();
+              return (
+                <>
+                  <Show when={done()}>
+                    <button
+                      class="help-btn layers-btn"
+                      classList={{ on: !hideDone() }}
+                      title={hideDone() ? `Показать завершённые комментарии (${done()})` : 'Скрыть завершённые комментарии'}
+                      onClick={() => setHideDone(!hideDone())}
+                    >
+                      {hideDone() ? `✓ ${done()} скрыто` : '✓ видны'}
+                    </button>
+                  </Show>
+                  <button class="help-btn layers-btn" classList={{ on: commentsOpen() }} title="Комментарии (Shift+C)" onClick={() => setCommentsOpen(!commentsOpen())}>
+                    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M4 16V9a6 6 0 1 1 6 6H4Z" /></svg>
+                    {open()}
+                  </button>
+                </>
+              );
+            })()}
+          </Show>
+          <Show when={editor() && ui()}>
             <button
               class="help-btn layers-btn"
               classList={{ on: layersOpen() }}
@@ -790,7 +901,7 @@ export function App() {
           <div class="zoom">{Math.round(zoom() * 100)}%</div>
         </div>
         <Show when={settings()}>
-          <SettingsDialog onClose={() => setSettings(false)} />
+          <SettingsDialog onClose={() => setSettings(false)} onSaved={(s) => s.author && setAuthor(s.author)} />
         </Show>
         <Show when={help()}>
           <HelpDialog onClose={() => setHelp(false)} onBench={(n) => void openBench(n, true)} />
@@ -852,6 +963,57 @@ export function App() {
             }}
             onClose={() => setStylesOpen(false)}
           />
+        </Show>
+        <Show when={commentsOpen() && editor() && ui() && opened}>
+          <CommentsPanel
+            comments={opened!.comments}
+            version={ui()}
+            hideDone={hideDone()}
+            openId={openThread()}
+            onHideDone={setHideDone}
+            onOpen={(id) => showThread(id, true)}
+            onClose={() => setCommentsOpen(false)}
+          />
+        </Show>
+        <Show when={(openThread() || draft()) && opened && ui()}>
+          {(() => {
+            const anchor = () => {
+              ui();
+              zoom();
+              const id = openThread();
+              if (id) return opened?.pins.screenPoint(id) ?? { x: 0, y: 0 };
+              const d = draft()!;
+              return view()!.worldToScreen(d.x, d.y);
+            };
+            return (
+              <>
+                <Show when={draft()}>
+                  <div class="comment-pin draft" style={{ transform: `translate(${anchor().x - 3}px, ${anchor().y - 28}px)` }}>
+                    <svg width="30" height="30" viewBox="0 0 24 24"><path d="M2 22V11a9 9 0 1 1 9 9H2Z" fill="#4262ff" stroke="#fff" stroke-width="1.6" /></svg>
+                  </div>
+                </Show>
+                <ThreadPopover
+                  comments={opened!.comments}
+                  threadId={openThread()}
+                  draftAt={draft()}
+                  anchor={anchor()}
+                  author={author()}
+                  markdown={markdown}
+                  files={files}
+                  from={current()}
+                  version={ui()}
+                  onCreated={(id) => showThread(id)}
+                  onNavigate={(target, resolved) => {
+                    // Из комментария заметку не создаём: ссылка на несуществующую — просто сообщение.
+                    const path = resolved ?? files.resolve(target, current());
+                    if (path) void navigate(target, path);
+                    else flash(`Заметки «${target.split('|')[0]}» в базе нет`);
+                  }}
+                  onClose={closeThread}
+                />
+              </>
+            );
+          })()}
         </Show>
         <Show when={layersOpen() && editor() && ui()}>
           <LayersPanel editor={editor()!} ui={ui()!} onClose={() => setLayersOpen(false)} />

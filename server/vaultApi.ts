@@ -55,9 +55,15 @@ async function obsidianVaults(): Promise<string[] | null> {
   return null;
 }
 
-async function readSettings(): Promise<{ proxy?: string }> {
+interface Settings {
+  proxy?: string;
+  /** Имя в комментариях. */
+  author?: string;
+}
+
+async function readSettings(): Promise<Settings> {
   try {
-    return JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')) as { proxy?: string };
+    return JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')) as Settings;
   } catch {
     return {};
   }
@@ -323,10 +329,13 @@ export function vaultApi(root: string): Plugin {
     }
 
     if (url.pathname === '/settings') {
-      if (req.method === 'GET') return sendJson(res, 200, await readSettings());
+      // Имя по умолчанию — имя пользователя Windows, пока автор не впишет своё.
+      if (req.method === 'GET') return sendJson(res, 200, { ...(await readSettings()), defaultAuthor: os.userInfo().username });
       if (req.method === 'PUT') {
-        const next = JSON.parse(await readBody(req)) as { proxy?: string };
-        if (next.proxy) new URL(next.proxy);
+        const raw = JSON.parse(await readBody(req)) as Settings;
+        const next: Settings = {};
+        if (raw.proxy) next.proxy = String(new URL(raw.proxy)).replace(/\/$/, '');
+        if (raw.author?.trim()) next.author = raw.author.trim().slice(0, 60);
         await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
         await fs.writeFile(SETTINGS_FILE, JSON.stringify(next, null, 1), 'utf8');
         return sendJson(res, 200, next);

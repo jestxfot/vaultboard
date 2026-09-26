@@ -27,7 +27,7 @@ import { type Guide, snapRect, type XEdge, type YEdge } from './snap.ts';
 import { distToLine, distToSegment, geomPoints, inRect, rectContains, rectFromPoints, rectsIntersect, round2, unionRect } from './hit.ts';
 import { type CloseReason, type EditField, TextEditor } from './TextEditor.ts';
 
-export type Tool = 'select' | 'sticky' | 'text' | 'shape' | 'line' | 'frame' | 'pen' | 'marker' | 'eraser' | 'lasso';
+export type Tool = 'select' | 'sticky' | 'text' | 'shape' | 'line' | 'frame' | 'pen' | 'marker' | 'eraser' | 'lasso' | 'comment';
 
 /** Быстрая кисть: цвет и толщина. У ручки их три, как в Miro. */
 export interface PenPreset {
@@ -175,6 +175,10 @@ export class Editor {
   onPlayEmbed: ((id: string) => void) | null = null;
   /** Открыть или закрыть панель слоёв (Shift+L). */
   onLayers: (() => void) | null = null;
+  /** Инструмент «Комментарий»: щёлкнули по доске — начать обсуждение в этой точке. */
+  onComment: ((at: Point) => void) | null = null;
+  /** Открыть или закрыть список комментариев (Shift+C). */
+  onCommentsPanel: (() => void) | null = null;
   /** Вставили адрес страницы — приложение разворачивает его в карточку и зовёт applyUnfurl. */
   onUnfurl: ((id: string, url: string) => void) | null = null;
   /** Щелчок правой кнопкой: меню по объекту (target) или по доске (target = null). */
@@ -380,6 +384,11 @@ export class Editor {
     }
     if (this.tool === 'lasso') {
       this.gesture = { kind: 'lasso', points: [w] };
+      return;
+    }
+    if (this.tool === 'comment') {
+      this.setTool('select');
+      this.onComment?.(w);
       return;
     }
 
@@ -2084,6 +2093,11 @@ export class Editor {
       case 'KeyM': handled(); this.setTool('marker'); break;
       case 'KeyE': handled(); this.setTool('eraser'); break;
       case 'KeyD': handled(); this.onCreateDoc?.(this.cursorPoint()); break;
+      case 'KeyC':
+        handled();
+        if (e.shiftKey) this.onCommentsPanel?.();
+        else this.setTool(this.tool === 'comment' ? 'select' : 'comment');
+        break;
     }
   }
 
