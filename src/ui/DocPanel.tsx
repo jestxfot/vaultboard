@@ -19,6 +19,7 @@ export type DocMode = 'read' | 'edit';
 const SAVE_DELAY_MS = 500;
 
 // Оформление markdown в редакторе: заголовки крупнее, жирный жирный, служебные знаки бледные — как в Obsidian.
+// Цвета — переменные темы, поэтому в тёмной теме редактор тоже тёмный.
 const highlight = HighlightStyle.define([
   { tag: tags.heading1, fontSize: '1.6em', fontWeight: '700' },
   { tag: tags.heading2, fontSize: '1.35em', fontWeight: '700' },
@@ -27,11 +28,11 @@ const highlight = HighlightStyle.define([
   { tag: tags.strong, fontWeight: '700' },
   { tag: tags.emphasis, fontStyle: 'italic' },
   { tag: tags.strikethrough, textDecoration: 'line-through' },
-  { tag: tags.link, color: '#4262ff' },
+  { tag: tags.link, color: 'var(--accent)' },
   { tag: tags.url, color: '#8a8a8a' },
-  { tag: tags.monospace, fontFamily: 'Consolas, "Cascadia Mono", monospace', backgroundColor: '#f1f1ef' },
-  { tag: tags.quote, color: '#555' },
-  { tag: tags.processingInstruction, color: '#b4b4b0' },
+  { tag: tags.monospace, fontFamily: 'Consolas, "Cascadia Mono", monospace', backgroundColor: 'var(--hover)' },
+  { tag: tags.quote, color: 'var(--quote)' },
+  { tag: tags.processingInstruction, color: 'var(--faint)' },
 ]);
 
 function basename(path: string): string {

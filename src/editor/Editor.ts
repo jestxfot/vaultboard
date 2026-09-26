@@ -2075,6 +2075,14 @@ export class Editor {
       if (!list) byKey.set(key, (list = []));
       list.push(id);
     }
+    // Выделена ровно одна группа — выравниваем её объекты между собой (например, годы внутри группы таймлайна).
+    if (byKey.size === 1) {
+      const only = [...byKey.values()][0];
+      if (only.length > 1) {
+        byKey.clear();
+        for (const id of only) byKey.set(id, [id]);
+      }
+    }
     const units: { ids: string[]; rect: Rect }[] = [];
     for (const ids of byKey.values()) {
       const items = ids.map((id) => this.store.get(id)!);

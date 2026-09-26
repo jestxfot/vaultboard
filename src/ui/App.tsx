@@ -7,6 +7,7 @@ import { generateBoard } from '../bench/generate.ts';
 import { type PhaseResult, runAutopilot } from '../bench/autopilot.ts';
 import { type BoardEntry, SITE, vault } from '../io/vault.ts';
 import { PublishDialog } from './PublishDialog.tsx';
+import { applyTheme, BOARD_BACKGROUND, loadTheme, onSystemTheme, saveTheme, THEME_NAMES, type ThemeChoice } from './theme.ts';
 import { BoardSession, type SaveState } from '../io/session.ts';
 import { BoardView } from '../render/BoardView.ts';
 import { Editor, type EditorUi } from '../editor/Editor.ts';
@@ -192,6 +193,17 @@ export function App() {
   const [layersOpen, setLayersOpen] = createSignal(false);
   /** Окно публикации доски на сайт. */
   const [publishing, setPublishing] = createSignal(false);
+  /** Тема интерфейса: выбор (как в системе / светлая / тёмная) и то, что из него вышло. */
+  const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(loadTheme());
+  const [theme, setThemeSignal] = createSignal(applyTheme(themeChoice()));
+  function setTheme(choice: ThemeChoice) {
+    setThemeChoice(choice);
+    saveTheme(choice);
+    const t = applyTheme(choice);
+    setThemeSignal(t);
+    view()?.setDefaultBackground(BOARD_BACKGROUND[t]);
+  }
+  const nextTheme = (): ThemeChoice => (themeChoice() === 'system' ? (theme() === 'dark' ? 'light' : 'dark') : themeChoice() === 'dark' ? 'light' : 'system');
   /** Строка поиска по доске (Ctrl+F). */
   const [searchOpen, setSearchOpen] = createSignal(false);
   /** Миникарта видна (по умолчанию да; выбор запоминается). */
@@ -393,7 +405,7 @@ export function App() {
 
   function setBackground(change: Partial<Background>) {
     if (!opened) return;
-    const cur = opened.store.doc.background ?? { color: '#f7f7f5', grid: 'dots' as GridKind };
+    const cur = opened.store.doc.background ?? { color: BOARD_BACKGROUND[theme()], grid: 'dots' as GridKind };
     opened.store.transact('Фон доски', () => opened!.store.setProp('background', { ...cur, ...change }));
   }
 
@@ -401,9 +413,9 @@ export function App() {
     setExporting({ area, selection: opened?.editor.selectionWorldRect() ?? null });
   }
 
-  async function runExport(area: Rect, scale: number, format: ExportFormat) {
+  async function runExport(area: Rect, scale: number, format: ExportFormat, onProgress: (done: number, total: number) => void) {
     const v = view()!;
-    const result = await exportBoard({ renderTile: (r, s, w, h) => v.renderTile(r, s, w, h), background: v.backgroundColor }, area, scale, format);
+    const result = await exportBoard({ renderTile: (r, s, w, h) => v.renderTile(r, s, w, h), background: v.backgroundColor }, area, scale, format, onProgress);
     const base = (current() || 'доска').replace(/\/доска\.board$/i, '').split('/').pop()!.replace(/\.board$/i, '');
     const how = await saveBlob(result.blob, `${base}.${format}`);
     if (how !== 'cancelled') flash(`Экспорт: ${result.width}×${result.height}, ${(result.blob.size / 1024 / 1024).toFixed(1)} МБ${how === 'downloaded' ? ' — в папке загрузок' : ''}`);
@@ -635,7 +647,7 @@ export function App() {
   /** Меню по пустой доске: вставить и создать здесь, выделить всё, фон, стили, экспорт. */
   function boardMenu(at: { x: number; y: number }): MenuEntry[] {
     const ed = opened!.editor;
-    const bg = opened!.store.doc.background ?? { color: '#f7f7f5', grid: 'dots' as GridKind };
+    const bg = opened!.store.doc.background ?? { color: BOARD_BACKGROUND[theme()], grid: 'dots' as GridKind };
     return [
       { label: 'Вставить здесь', hint: 'Ctrl+V', action: () => void ed.pasteAt(at) },
       {
@@ -862,6 +874,11 @@ export function App() {
 
   onMount(async () => {
     const v = await BoardView.create(host, perf);
+    v.setDefaultBackground(BOARD_BACKGROUND[theme()]);
+    // «Как в системе»: Windows переключилась на тёмную — и приложение за ней.
+    onCleanup(onSystemTheme(() => {
+      if (themeChoice() === 'system') setTheme('system');
+    }));
     v.onCamera = () => {
       setZoom(v.cam.zoom);
       opened?.editor.cameraChanged();
@@ -1119,6 +1136,13 @@ export function App() {
               {(ui(), editor()!.layers().length > 1 ? editor()!.layers().find((l) => l.id === editor()!.activeLayer)?.name : 'Слои')}
             </button>
           </Show>
+          <button
+            class="help-btn"
+            title={`Тема: ${THEME_NAMES[themeChoice()]}. Щелчок — ${THEME_NAMES[nextTheme()]}`}
+            onClick={() => setTheme(nextTheme())}
+          >
+            {theme() === 'dark' ? '☾' : '☀'}
+          </button>
           <button class="help-btn" classList={{ on: minimapOn() }} title={minimapOn() ? 'Скрыть миникарту' : 'Показать миникарту'} onClick={() => setMinimapOn(!minimapOn())}>
             <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="4" width="15" height="12" rx="1.5" /><rect x="9" y="8.5" width="6" height="5" rx=".8" fill="currentColor" fill-opacity=".25" /></svg>
           </button>

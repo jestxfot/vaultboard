@@ -193,6 +193,8 @@ export class BoardView {
   private hiddenLayers = new Set<string>();
   private lockedLayers = new Set<string>();
   private darkBackground = false;
+  /** Фон доски, у которой он не задан, — фон темы интерфейса (светлой или тёмной). */
+  private defaultBackground = '#f7f7f5';
   /** Файл (фото или заметка) → объекты доски, которые его показывают. */
   private readonly fileViews = new Map<string, Set<ItemView>>();
   /** Камера сейчас движется — оригиналы фото не грузим, пока не остановится. */
@@ -859,9 +861,17 @@ export class BoardView {
 
   // ---------- фон ----------
 
+  /** Сменилась тема: доска без своего фона перекрашивается (и текст на ней — под светлый или тёмный фон). */
+  setDefaultBackground(color: string): void {
+    if (color === this.defaultBackground) return;
+    this.defaultBackground = color;
+    if (this.doc && !this.doc.background) this.apply([{ t: 'prop', key: 'background', before: undefined, after: undefined }]);
+    else if (!this.doc) this.applyBackground(undefined);
+  }
+
   /** Фон доски: цвет и сетка (точки, клетка или ничего), как в Miro. На тёмном фоне сетка светлее. */
   private applyBackground(bg: Background | undefined): void {
-    const color = bg?.color ?? '#f7f7f5';
+    const color = bg?.color ?? this.defaultBackground;
     const grid = bg?.grid ?? 'dots';
     this.app.renderer.background.color = color;
     this.darkBackground = isDark(color);
@@ -1426,7 +1436,7 @@ export class BoardView {
 
   /** Цвет фона доски — экспорт кладёт картинку на него. */
   get backgroundColor(): string {
-    return this.doc?.background?.color ?? '#f7f7f5';
+    return this.doc?.background?.color ?? this.defaultBackground;
   }
 
   /**
@@ -1445,7 +1455,10 @@ export class BoardView {
     if (this.farLines) this.farLines.visible = scale < FAR_LINES_ZOOM;
 
     // Всё построить сразу: фигуры, тексты, линии — без очередей и лимитов на кадр.
+    // `built` — в этой плитке что-то строилось заново (тогда тексты заметок надо подождать, см. ниже).
+    let built = false;
     for (let guard = 0; guard < 1000 && (this.nearQueue.size || this.labelQueue.size || this.miscQueue.size); guard++) {
+      built = true;
       for (const [v, task] of this.nearQueue) { this.nearQueue.delete(v); task(); }
       for (const [v, task] of this.labelQueue) { this.labelQueue.delete(v); task(); }
       for (const [k, task] of this.miscQueue) { this.miscQueue.delete(k); task(); }
@@ -1458,7 +1471,7 @@ export class BoardView {
         v.label.resolution = res;
         v.labelRes = res;
       }
-      if (v.body) {
+      if (v.body && (built || v.body.resolution !== res)) {
         v.body.resolution = res;
         bodies = true;
       }
@@ -1481,6 +1494,8 @@ export class BoardView {
       if (!waiting || performance.now() > deadline) break;
       await new Promise((r) => setTimeout(r, 60));
     }
+    // Текст заметки (HTMLText) готовится асинхронно — ждём, только если в этой плитке он новый или
+    // поменял чёткость; соседние плитки с теми же, уже готовыми заметками больше не ждут по 0,4 с.
     if (bodies) await new Promise((r) => setTimeout(r, 400));
 
     this.world.position.set(this.cam.x, this.cam.y);

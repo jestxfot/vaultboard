@@ -9,27 +9,29 @@ export function ExportDialog(props: {
   board: Rect;
   selection: Rect | null;
   initialArea: 'board' | 'selection';
-  onExport: (area: Rect, scale: number, format: ExportFormat) => Promise<void>;
+  onExport: (area: Rect, scale: number, format: ExportFormat, onProgress: (done: number, total: number) => void) => Promise<void>;
   onClose: () => void;
 }) {
   const [format, setFormat] = createSignal<ExportFormat>('png');
   const [scale, setScale] = createSignal(2);
   const [area, setArea] = createSignal<'board' | 'selection'>(props.selection ? props.initialArea : 'board');
   const [busy, setBusy] = createSignal(false);
+  const [progress, setProgress] = createSignal('');
   const rect = () => {
     const r = area() === 'selection' && props.selection ? props.selection : props.board;
     const pad = 40;
     return { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 };
   };
-  const info = createMemo(() => plan(rect(), scale()));
+  const info = createMemo(() => plan(rect(), scale(), format()));
 
   const run = async () => {
     setBusy(true);
     try {
-      await props.onExport(rect(), scale(), format());
+      await props.onExport(rect(), scale(), format(), (done, total) => setProgress(total > 1 ? ` ${Math.round((done / total) * 100)}%` : ''));
       props.onClose();
     } finally {
       setBusy(false);
+      setProgress('');
     }
   };
 
@@ -64,12 +66,16 @@ export function ExportDialog(props: {
           {format() === 'jpg' && 'JPG по своей природе сжимает с потерями — ставим максимальное качество. Без потерь — PNG или PDF.'}
           {format() === 'pdf' && 'PDF — внутри картинка, сжатая без потерь (как PNG).'}
           <Show when={info().reduced}>
-            <div class="bad">Доска слишком большая для одной картинки в браузере — чёткость уменьшена до ×{info().scale.toFixed(2)}.</div>
+            <div class="bad">
+              {format() === 'jpg'
+                ? `JPG браузер собирает одним холстом, а у него предел по размеру — чёткость уменьшена до ×${info().scale.toFixed(2)}. PNG и PDF пишутся по частям и такого предела не имеют.`
+                : `Очень большая картинка — чёткость уменьшена до ×${info().scale.toFixed(2)}, чтобы файл остался разумного размера.`}
+            </div>
           </Show>
         </div>
         <div class="dialog-actions">
           <button onClick={() => props.onClose()} disabled={busy()}>Отмена</button>
-          <button class="primary" onClick={() => void run()} disabled={busy()}>{busy() ? 'Собираю…' : 'Сохранить'}</button>
+          <button class="primary" onClick={() => void run()} disabled={busy()}>{busy() ? `Собираю…${progress()}` : 'Сохранить'}</button>
         </div>
       </div>
     </div>

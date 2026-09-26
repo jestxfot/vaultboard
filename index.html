@@ -7,6 +7,12 @@
     <script>
       // YouTube не показывает встроенное видео на странице с адресом-цифрами (127.0.0.1): открываем то же самое как localhost.
       if (location.hostname === '127.0.0.1' || location.hostname === '[::1]') location.replace(location.href.replace(location.hostname, 'localhost'));
+      // Тема — до загрузки приложения, чтобы тёмная не мигала светлой (выбор хранит src/ui/theme.ts).
+      try {
+        var t = localStorage.getItem('vaultboard:theme');
+        if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.dataset.theme = t;
+      } catch (e) {}
     </script>
   </head>
   <body>
