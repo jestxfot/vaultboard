@@ -323,11 +323,15 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
   function watchReleases(): void {
     const every = Number(process.env.VAULTBOARD_WATCH_MS) || 3 * 60_000;
     const quiet = Number(process.env.VAULTBOARD_IDLE_MS) || 10 * 60_000;
+    // Копия из git (разработка) по таймеру GitHub не спрашивает: обновляется она через git pull, а лимит API
+    // (60 запросов в час с одного адреса) общий с установкой на этом же компьютере — его нельзя тратить зря.
+    // Узнать версию в ней можно щелчком по номеру версии.
+    if (isGitCheckout(projectDir)) return;
     void refreshRelease();
     setInterval(async () => {
       checkedAt = Math.min(checkedAt, Date.now() - 20_000);
       await refreshRelease();
-      if (!canRestart || isGitCheckout(projectDir)) return;
+      if (!canRestart) return;
       if ((await readSettings()).autoUpdate === false) return;
       if (Date.now() - lastActivity < quiet) return;
       if (known && isNewer(known.tag, currentVersion(projectDir))) restartWithUpdate();
@@ -387,7 +391,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
 
     if (req.method === 'GET' && url.pathname === '/update') {
       // Что известно о версии. «force» — спросить GitHub сейчас (всё равно не чаще раза в 20 секунд).
-      if (url.searchParams.has('force') || !checkedAt) await refreshRelease();
+      if (url.searchParams.has('force') || (!checkedAt && !isGitCheckout(projectDir))) await refreshRelease();
       return sendJson(res, 200, await updateStatus());
     }
 
