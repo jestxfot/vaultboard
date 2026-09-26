@@ -2278,6 +2278,13 @@ export class Editor {
     }
     for (const e of this.lineEnds()) g.circle(e.x, e.y, 6).fill(0xffffff).stroke({ width: 2, color: BLUE });
 
+    // Центр доски 0, 0 — неброский крестик, чтобы было от чего считать координаты.
+    const o = this.view.worldToScreen(0, 0);
+    const { w: sw, h: sh } = this.view.screen;
+    if (o.x > -10 && o.y > -10 && o.x < sw + 10 && o.y < sh + 10) {
+      g.moveTo(o.x - 8, o.y).lineTo(o.x + 8, o.y).moveTo(o.x, o.y - 8).lineTo(o.x, o.y + 8).stroke({ width: 1.5, color: 0x8f8f8b, alpha: 0.7 });
+      g.circle(o.x, o.y, 2.5).fill({ color: 0x8f8f8b, alpha: 0.7 });
+    }
     // Подсветка объектов, к которым прилипли: мягкая розовая «тень» и рамка — видно, с чем выровнялось.
     for (const r of this.snapHits) {
       const s = this.toScreenRect(r);

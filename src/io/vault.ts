@@ -49,6 +49,8 @@ export interface UpdateStatus {
   enabled: boolean;
   latest: { tag: string; name: string; notes: string; url: string } | null;
   available: boolean;
+  /** Можно обновиться кнопкой, не закрывая приложение. */
+  canApply: boolean;
 }
 
 export const vault = {
@@ -162,6 +164,15 @@ export const vault = {
 
   /** Вышел ли новый релиз на GitHub. `force` — спросить GitHub сейчас, а не взять ответ часовой давности. */
   updateStatus: (force = false) => request<UpdateStatus>(`/api/update${force ? '?force' : ''}`),
+
+  /**
+   * Долгий запрос: сервер ответит, когда узнает о версии, отличной от `known` (или через 4 минуты).
+   * Оборвался — значит, сервер перезапускается.
+   */
+  updateWait: (known: string) => request<UpdateStatus>(`/api/update/wait?known=${encodeURIComponent(known)}`),
+
+  /** Обновиться сейчас: сервер перезапустится с новой версией (страницу потом перезагрузить). */
+  applyUpdate: () => request<{ ok: boolean }>('/api/update/apply', { method: 'POST' }),
 
   resolve: (from: string, refs: string[]) =>
     request<Record<string, string | null>>('/api/resolve', {

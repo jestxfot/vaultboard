@@ -564,3 +564,11 @@ kbd { font: 500 11.5px/1.4 "Segoe UI", system-ui, sans-serif; background: #f4f4f
 .side-brand:hover { background: #f1f1ef; }
 .side-version { font-weight: 500; font-size: 11px; color: var(--muted); margin-left: 3px; }
 .side-update { font-weight: 700; font-size: 10.5px; color: #fff; background: #27ae60; border-radius: 8px; padding: 1px 6px; margin-left: 4px; }
+
+.update-banner .ub-now { font: inherit; font-size: 12.5px; font-weight: 700; border: 0; border-radius: 7px; background: #4262ff; color: #fff; padding: 4px 10px; cursor: pointer; }
+.update-banner .ub-later { font: inherit; font-size: 12.5px; border: 1px solid rgba(255,255,255,.35); border-radius: 7px; background: none; color: #fff; padding: 3px 9px; cursor: pointer; }
+.update-overlay { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(247, 247, 245, .82); backdrop-filter: blur(2px); }
+.update-box { display: flex; align-items: center; gap: 14px; max-width: 420px; padding: 18px 22px; border-radius: 14px; background: var(--panel); box-shadow: 0 16px 50px rgba(20, 24, 60, .2); font-size: 14px; line-height: 1.45; }
+.update-spinner { width: 22px; height: 22px; flex: none; border-radius: 50%; border: 3px solid #dfe5ff; border-top-color: var(--accent); animation: vb-spin .8s linear infinite; }
+@keyframes vb-spin { to { transform: rotate(360deg); } }
+.coords { font-size: 11.5px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 15px; padding: 5px 10px; font-variant-numeric: tabular-nums; pointer-events: none; }

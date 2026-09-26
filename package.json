@@ -7,12 +7,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "stable": "vite build && vite preview --port 5180 --strictPort",
+    "build": "vite build && vite build -c vite.server.config.ts",
+    "stable": "npm run build && npm start",
     "check": "tsc --noEmit",
     "test": "node scripts/test-format.ts && node scripts/test-store.ts",
     "update": "node scripts/update.mjs",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "start": "node dist-server/server.mjs",
+    "pack": "node scripts/pack.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",

@@ -23,6 +23,7 @@ import { LayersPanel } from './LayersPanel.tsx';
 import { HelpDialog } from './HelpDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
 import { SetupDialog } from './SetupDialog.tsx';
+import { Updater } from './Updater.tsx';
 import type { Settings, SetupInfo, UpdateStatus } from '../io/vault.ts';
 import { EmbedLayer } from './EmbedLayer.ts';
 import { CommentsLayer } from './CommentsLayer.ts';
@@ -66,6 +67,8 @@ interface Opened {
 }
 
 const CAMERA_KEY = 'vaultboard:camera:';
+/** Какая доска была открыта последней — с неё начинается следующий запуск. */
+const LAST_BOARD_KEY = 'vaultboard:last-board';
 
 function loadCamera(path: string): { x: number; y: number; zoom: number } | null {
   try {
@@ -142,6 +145,8 @@ export function App() {
   const [notice, setNotice] = createSignal('');
   const [error, setError] = createSignal('');
   const [zoom, setZoom] = createSignal(1);
+  /** Где курсор на доске — показываем координаты в углу. */
+  const [cursor, setCursor] = createSignal<{ x: number; y: number } | null>(null);
   const [showPerf, setShowPerf] = createSignal(false);
   const [help, setHelp] = createSignal(false);
   const [settings, setSettings] = createSignal(false);
@@ -151,8 +156,6 @@ export function App() {
   const [wizardAgain, setWizardAgain] = createSignal<Settings | null>(null);
   /** Вышел новый релиз — показываем плашку (её можно закрыть). */
   const [update, setUpdate] = createSignal<UpdateStatus | null>(null);
-  /** Плашку о новой версии закрыли — отметка у номера версии в панели остаётся. */
-  const [updateBanner, setUpdateBanner] = createSignal(true);
   /** Панель досок свёрнута — выезжает поверх доски, когда мышь у левого края. Запоминается. */
   const [collapsed, setCollapsed] = createSignal(readFlag('vaultboard:sidebar-collapsed'));
   const [peek, setPeek] = createSignal(false);
@@ -683,6 +686,12 @@ export function App() {
         await mount(parseBoard(text), path, mtime, 'Доска', started);
       }
       history.replaceState(null, '', `?open=${encodeURIComponent(path)}`);
+      // Запомнить доску: следующий запуск откроет её же, на том же месте (место на доске помнится отдельно).
+      try {
+        localStorage.setItem(LAST_BOARD_KEY, path);
+      } catch {
+        // Не запомнится — откроется черновик.
+      }
     } catch (err) {
       setError((err as Error).message);
     }
@@ -744,6 +753,17 @@ export function App() {
       }
     };
     setView(v);
+    // Координаты курсора в углу: не чаще раза в кадр.
+    let cursorFrame = 0;
+    host.addEventListener('pointermove', (e) => {
+      if (cursorFrame) return;
+      cursorFrame = requestAnimationFrame(() => {
+        cursorFrame = 0;
+        const r = host.getBoundingClientRect();
+        setCursor(v.screenToWorld(e.clientX - r.left, e.clientY - r.top));
+      });
+    });
+    host.addEventListener('pointerleave', () => setCursor(null));
     // Щелчок по доске мимо окна обсуждения закрывает его, как в Miro (булавки открывают своё сами).
     host.addEventListener('pointerdown', (e) => {
       if ((openThread() || draft()) && !(e.target as HTMLElement).closest('.comment-pin')) closeThread();
@@ -756,7 +776,6 @@ export function App() {
       void files.refresh().catch(() => undefined);
       void vault.getLibrary().then(setLibrary).catch(() => undefined);
     }
-    void vault.updateStatus().then((u) => { if (u.available) setUpdate(u); }, () => undefined);
     if (import.meta.env.DEV) Object.assign(window, { __view: v, __docs: docs, __files: files });
 
     const onKey = (e: KeyboardEvent) => {
@@ -788,7 +807,17 @@ export function App() {
     if (!setup()) await refreshBoards().catch((err: Error) => setError(err.message));
     if (params.get('bench')) await openBench(Number(params.get('bench')), params.get('auto') === '1');
     else if (params.get('open')) await openBoard(params.get('open')!);
-    else await mount(emptyBoard(), null, 'new', 'Черновик (не сохраняется) — создай или открой доску слева', performance.now());
+    else {
+      // Открыть доску, на которой остановились в прошлый раз (если она ещё есть).
+      let last: string | null = null;
+      try {
+        last = localStorage.getItem(LAST_BOARD_KEY);
+      } catch {
+        // Нет доступа к хранилищу браузера — начнём с черновика.
+      }
+      if (last && boards().some((b) => b.path === last)) await openBoard(last);
+      else await mount(emptyBoard(), null, 'new', 'Черновик (не сохраняется) — создай или открой доску слева', performance.now());
+    }
   });
 
   return (
@@ -932,6 +961,13 @@ export function App() {
           </Show>
           <button class="help-btn" title="Настройки" onClick={() => setSettings(true)}>⚙</button>
           <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
+          <Show when={cursor()}>
+            {(c) => (
+              <div class="coords" title="Координаты на доске: центр 0, 0 отмечен крестиком">
+                x {Math.round(c().x)} · y {Math.round(c().y)}
+              </div>
+            )}
+          </Show>
           <div class="zoom">{Math.round(zoom() * 100)}%</div>
         </div>
         <Show when={setup()}>
@@ -958,18 +994,12 @@ export function App() {
             />
           )}
         </Show>
-        <Show when={updateBanner() && update()}>
-          {(u) => (
-            <div class="update-banner">
-              <span>
-                Вышла версия <b>{u().latest!.tag}</b>
-                {u().git ? ' — у тебя копия из git: git pull' : u().enabled ? ' — поставится при следующем запуске vaultboard.vbs' : ' — автообновление выключено в настройках'}
-              </span>
-              <a href={u().latest!.url} target="_blank" rel="noopener">Что нового</a>
-              <button onClick={() => setUpdateBanner(false)} title="Скрыть">×</button>
-            </div>
-          )}
-        </Show>
+        <Updater
+          onStatus={setUpdate}
+          beforeRestart={async () => {
+            if (opened?.session?.hasUnsaved) await opened.session.save();
+          }}
+        />
         <Show when={settings()}>
           <SettingsDialog onClose={() => setSettings(false)} onSaved={(s) => s.author && setAuthor(s.author)} />
         </Show>

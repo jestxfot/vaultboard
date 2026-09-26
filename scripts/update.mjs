@@ -13,7 +13,7 @@
 //
 // Только встроенные модули Node: скрипт должен работать до того, как поставлены зависимости.
 // Zip распаковываем сами (zlib) — без внешних программ, одинаково на любой системе.
-import { existsSync, promises as fs, readFileSync } from 'node:fs';
+import { existsSync, promises as fs, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import os from 'node:os';
@@ -88,26 +88,53 @@ export function currentVersion(projectDir) {
   return readJson(path.join(projectDir, 'package.json'))?.version ?? '0.0.0';
 }
 
+/** Разобрать ответ GitHub о релизе. Готовая сборка (vaultboard.zip в файлах релиза) — лучше архива исходников. */
+function toRelease(r) {
+  if (!r?.tag_name || !parseVersion(r.tag_name)) return null;
+  const asset = (r.assets ?? []).find((a) => a?.name === 'vaultboard.zip');
+  return {
+    tag: r.tag_name,
+    name: r.name || r.tag_name,
+    notes: r.body ?? '',
+    url: r.html_url ?? `https://github.com/${REPO}/releases`,
+    // Готовая сборка не требует ни npm install, ни сборки; нет её — архив исходников тега.
+    // Для проверки можно отдать свой адрес в поле vaultboard_zip.
+    zip: r.vaultboard_zip ?? asset?.browser_download_url ?? `https://codeload.github.com/${REPO}/zip/refs/tags/${encodeURIComponent(r.tag_name)}`,
+    prebuilt: !!(r.vaultboard_prebuilt ?? asset),
+  };
+}
+
 /**
- * Последний релиз на GitHub: { tag, name, notes, url, zip } или null (нет сети, нет релизов).
+ * Последний релиз с условным запросом: передай ETag прошлого ответа — если на GitHub ничего не поменялось,
+ * он ответит «304 не изменилось», и такой ответ не тратит лимит (60 запросов в час без входа).
+ * Ответ: { changed: false } | { changed: true, release, etag } | { error, retryAt? } (retryAt — когда кончится лимит).
+ */
+export async function checkRelease(etag = '', timeoutMs = 6000) {
+  try {
+    const headers = { 'User-Agent': 'vaultboard-updater', Accept: 'application/vnd.github+json' };
+    if (etag) headers['If-None-Match'] = etag;
+    const res = await fetch(RELEASE_API, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    if (res.status === 304) return { changed: false };
+    if (res.status === 403 || res.status === 429) {
+      const reset = Number(res.headers.get('x-ratelimit-reset'));
+      return { error: `лимит GitHub (${res.status})`, retryAt: reset ? reset * 1000 : Date.now() + 15 * 60_000 };
+    }
+    // Релизов ещё нет — это тоже ответ: новой версии нет.
+    if (res.status === 404) return { changed: true, release: null, etag: res.headers.get('etag') ?? '' };
+    if (!res.ok) return { error: `GitHub ответил ${res.status}` };
+    return { changed: true, release: toRelease(await res.json()), etag: res.headers.get('etag') ?? '' };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Последний релиз на GitHub: { tag, name, notes, url, zip, prebuilt } или null (нет сети, нет релизов).
  * Черновики и предрелизы GitHub в «latest» не отдаёт — обновляются только на настоящие релизы.
  */
 export async function latestRelease(timeoutMs = 6000) {
-  try {
-    const res = await get(RELEASE_API, 'application/vnd.github+json', timeoutMs);
-    const r = await res.json();
-    if (!r?.tag_name || !parseVersion(r.tag_name)) return null;
-    return {
-      tag: r.tag_name,
-      name: r.name || r.tag_name,
-      notes: r.body ?? '',
-      url: r.html_url ?? `https://github.com/${REPO}/releases`,
-      // Архив исходников тега; для проверки можно отдать свой адрес в поле zip.
-      zip: r.vaultboard_zip ?? `https://codeload.github.com/${REPO}/zip/refs/tags/${encodeURIComponent(r.tag_name)}`,
-    };
-  } catch {
-    return null;
-  }
+  const r = await checkRelease('', timeoutMs);
+  return r.changed ? r.release : null;
 }
 
 /**
@@ -153,15 +180,23 @@ function hashOf(file) {
   }
 }
 
-/** Путь из архива без верхней папки «vaultboard-<версия>/»; опасные пути («..», абсолютные) отбрасываем. */
-function relName(name) {
+/**
+ * Путь из архива без верхней папки («vaultboard/» или «vaultboard-<версия>/»); опасные пути («..», абсолютные) отбрасываем.
+ * `prebuilt` — готовая сборка: в ней dist уже собран и приходит из архива; из исходников dist не трогаем — его собирают у себя.
+ */
+function relName(name, prebuilt = false) {
   const rel = name.split('/').slice(1).join('/');
   if (!rel || rel.includes('..') || rel.startsWith('/') || /^[a-z]:/i.test(rel)) return null;
-  if (KEEP.some((k) => rel.startsWith(k))) return null;
+  if (KEEP.some((k) => rel.startsWith(k) && !(prebuilt && k === 'dist/'))) return null;
   return rel;
 }
 
-/** Скачать релиз и разложить его поверх папки проекта. Возвращает, поменялись ли зависимости. */
+/** Установка — готовая сборка из релиза (vaultboard.zip): зависимости и сборка ей не нужны. */
+export function isPrebuilt(projectDir) {
+  return readJson(path.join(projectDir, 'package.json'))?.vaultboardPrebuilt === true;
+}
+
+/** Скачать релиз и разложить его поверх папки проекта. Возвращает, поменялся ли package-lock.json. */
 export async function applyUpdate(projectDir, release, log = console.log) {
   log(`Скачиваю ${release.tag}…`);
   const res = await get(release.zip, 'application/zip', 120000);
@@ -169,9 +204,14 @@ export async function applyUpdate(projectDir, release, log = console.log) {
   const lockBefore = hashOf(path.join(projectDir, 'package-lock.json'));
 
   const files = [];
-  for (const e of entries) {
-    const rel = relName(e.name);
-    if (!rel) continue;
+  // package.json — последним: в нём номер версии. Если запись оборвётся посреди обновления,
+  // версия останется старой, и следующий запуск честно обновится ещё раз, а не застрянет на смеси файлов.
+  const ordered = entries
+    .map((e) => ({ rel: relName(e.name, release.prebuilt), data: e.data }))
+    .filter((e) => e.rel)
+    .sort((a, b) => (a.rel === 'package.json' ? 1 : 0) - (b.rel === 'package.json' ? 1 : 0));
+  for (const e of ordered) {
+    const rel = e.rel;
     const dest = path.join(projectDir, ...rel.split('/'));
     await fs.mkdir(path.dirname(dest), { recursive: true });
     // Сначала во временный файл, потом переименование: оборванная запись не оставит половину файла.
@@ -186,7 +226,7 @@ export async function applyUpdate(projectDir, release, log = console.log) {
   if (prev?.files) {
     const now = new Set(files);
     for (const rel of prev.files) {
-      if (now.has(rel) || !relName(`x/${rel}`)) continue;
+      if (now.has(rel) || !relName(`x/${rel}`, true)) continue;
       const file = path.join(projectDir, ...rel.split('/'));
       await fs.rm(file, { force: true });
       // Опустевшие папки тоже убираем — вверх до папки проекта.
@@ -206,20 +246,39 @@ export async function applyUpdate(projectDir, release, log = console.log) {
   return lockBefore !== hashOf(path.join(projectDir, 'package-lock.json'));
 }
 
-/** Поставить зависимости, если их нет или они поменялись. */
+/** Отметка «зависимости поставлены под такой package-lock.json» — пишется только после успешной установки. */
+const DEPS_MARK = path.join('node_modules', '.vaultboard-deps');
+
+/**
+ * Нужна ли установка зависимостей: их нет, или они ставились под другой package-lock.json
+ * (например, прошлая установка оборвалась — тогда отметки нет, и установка повторится).
+ */
+export function depsOutdated(projectDir) {
+  const lock = hashOf(path.join(projectDir, 'package-lock.json'));
+  let mark = null;
+  try {
+    mark = readFileSync(path.join(projectDir, DEPS_MARK), 'utf8').trim();
+  } catch {
+    // Отметки нет.
+  }
+  return !existsSync(path.join(projectDir, 'node_modules', '.package-lock.json')) || mark !== lock;
+}
+
+/** Поставить зависимости и отметить, под какой package-lock.json они стоят. */
 export function installDeps(projectDir, log = console.log) {
   log('Ставлю зависимости (npm install)…');
   execSync('npm install --no-audit --no-fund', { cwd: projectDir, stdio: 'inherit' });
+  const lock = hashOf(path.join(projectDir, 'package-lock.json'));
+  if (lock) writeFileSync(path.join(projectDir, DEPS_MARK), lock, 'utf8');
 }
 
 async function main() {
   const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const settings = readJson(settingsFile()) ?? {};
-  let depsChanged = false;
 
   if (isGitCheckout(projectDir)) {
     console.log('Копия из git — обновление через git pull, автообновление пропущено.');
-  } else if (settings.autoUpdate === false) {
+  } else if (settings.autoUpdate === false && !process.env.VAULTBOARD_FORCE_UPDATE) {
     console.log('Автообновление выключено в настройках.');
   } else {
     const latest = await latestRelease();
@@ -228,7 +287,7 @@ async function main() {
     else if (!isNewer(latest.tag, current)) console.log(`Версия ${current} — последняя (релиз ${latest.tag}).`);
     else {
       try {
-        depsChanged = await applyUpdate(projectDir, latest);
+        await applyUpdate(projectDir, latest);
       } catch (err) {
         // Не вышло обновиться — не страшно: запускаемся на том, что есть.
         console.log(`Обновление не удалось: ${err instanceof Error ? err.message : err}`);
@@ -236,12 +295,13 @@ async function main() {
     }
   }
 
-  // Папка node_modules может быть пустой или недоустановленной — смотрим на файл, который npm пишет в конце установки.
-  if (depsChanged || !existsSync(path.join(projectDir, 'node_modules', '.package-lock.json'))) installDeps(projectDir);
+  // Готовой сборке из релиза зависимости не нужны: сервер — один файл со всем внутри.
+  if (!isPrebuilt(projectDir) && depsOutdated(projectDir)) installDeps(projectDir);
 }
 
-// Запущен как программа, а не подключён сервером.
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Запущен как программа (node scripts/update.mjs), а не подключён сервером. Проверяем и имя файла:
+// сервер готовой сборки — один файл, куда этот модуль вшит, и там import.meta.url — это сам сервер.
+if (process.argv[1] && path.basename(process.argv[1]) === 'update.mjs' && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((err) => {
     console.error(err);
     process.exit(1);
