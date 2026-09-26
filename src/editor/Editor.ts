@@ -20,6 +20,7 @@ import { type Anchor, geomBounds, lineGeometry, lineMidpoint, type Point, type R
 import { drawStroke, textBox } from '../render/draw.ts';
 import { decodePoints, encodePoints, shiftPoints, type StrokePoint } from '../format/strokes.ts';
 import { recognize } from './recognize.ts';
+import { embedUrl } from '../format/embed.ts';
 import { type Guide, snapRect, type XEdge, type YEdge } from './snap.ts';
 import { distToLine, distToSegment, geomPoints, inRect, rectContains, rectFromPoints, rectsIntersect, round2, unionRect } from './hit.ts';
 import { type CloseReason, type EditField, TextEditor } from './TextEditor.ts';
@@ -168,6 +169,10 @@ export class Editor {
   onCreateDoc: ((at: Point) => void) | null = null;
   /** Ctrl+K — поиск заметки по базе. */
   onQuickOpen: (() => void) | null = null;
+  /** Запустить видео прямо на доске, поверх карточки ссылки. */
+  onPlayEmbed: ((id: string) => void) | null = null;
+  /** Вставили адрес страницы — приложение разворачивает его в карточку и зовёт applyUnfurl. */
+  onUnfurl: ((id: string, url: string) => void) | null = null;
   /** Щелчок правой кнопкой: меню по объекту (target) или по доске (target = null). */
   onContextMenu: ((e: { clientX: number; clientY: number; at: Point; target: string | null }) => void) | null = null;
 
@@ -612,6 +617,10 @@ export class Editor {
     const item = hit ? this.store.get(hit) : undefined;
     if (item?.kind === 'frame') this.editText(item.id, 'title');
     else if (item?.kind === 'image') this.onOpenImage?.(item.id);
+    else if (item?.kind === 'link') {
+      if (embedUrl(item.url)) this.onPlayEmbed?.(item.id);
+      else window.open(item.url, '_blank', 'noopener');
+    }
     else if (item?.kind === 'doc') this.onOpenDoc?.(this.view.paths.toVault(item.file), 'read');
     else if (item && isLine(item)) this.editText(item.id, 'label');
     else if (hasText(item)) this.editText(item.id, 'text');
@@ -656,6 +665,12 @@ export class Editor {
 
   private selectedBoxes(): BoxItem[] {
     return [...this.selection].map((id) => this.store.get(id)).filter(isBox);
+  }
+
+  /** Где объект на экране (для плеера поверх карточки). */
+  screenRectOf(id: string): Rect | null {
+    const r = this.view.rectOf(id);
+    return r ? this.toScreenRect(r) : null;
   }
 
   /** Рамка выделенного на доске (для экспорта выделенного). */
@@ -1747,8 +1762,46 @@ export class Editor {
     this.pasteText(text, this.cursorPoint());
   }
 
-  /** Вставить текст: наш буфер (объекты доски) — копиями, обычный текст — свободным текстом. */
+  /** Карточка ссылки у точки: сразу с адресом, через мгновение — с заголовком и обложкой. */
+  createLinkAt(url: string, at: Point): void {
+    const w = 320, h = 110;
+    const item: BoxItem = { id: this.id(), kind: 'link', url, x: round2(at.x - w / 2), y: round2(at.y - h / 2), w, h };
+    this.store.transact('Ссылка', () => this.store.insert(item));
+    this.select([item.id]);
+    this.onUnfurl?.(item.id, url);
+  }
+
+  /** Заполнить карточку ссылки тем, что сервер нашёл на странице. Пути картинок — от корня базы. */
+  applyUnfurl(id: string, data: { url: string; title?: string; description?: string; site?: string; image?: string; favicon?: string }): void {
+    const item = this.store.get(id);
+    if (!item || item.kind !== 'link') return;
+    const w = item.w;
+    const h = data.image ? Math.round(w * 0.52) + 122 : 124;
+    this.store.transact('Карточка ссылки', () =>
+      this.store.update(id, (it) => {
+        const next = { ...it, url: data.url, w, h } as Record<string, unknown>;
+        for (const k of ['title', 'description', 'site'] as const) if (data[k]) next[k] = data[k];
+        if (data.image) next.image = this.view.paths.toStored(data.image);
+        if (data.favicon) next.favicon = this.view.paths.toStored(data.favicon);
+        return next as unknown as Item;
+      }),
+    );
+  }
+
+  /** Адрес выделенной карточки ссылки (для меню: открыть, обновить). */
+  selectedLink(): { id: string; url: string } | null {
+    if (this.selection.size !== 1) return null;
+    const item = this.store.get([...this.selection][0]);
+    return item?.kind === 'link' ? { id: item.id, url: item.url } : null;
+  }
+
+  /** Вставить текст: наш буфер (объекты доски) — копиями, адрес страницы — карточкой, остальное — текстом. */
   pasteText(text: string, at: Point): void {
+    const trimmed = text.trim();
+    if (/^https?:\/\/\S+$/i.test(trimmed)) {
+      this.createLinkAt(trimmed, at);
+      return;
+    }
     try {
       const clip = JSON.parse(text) as { items?: Item[] } & Record<string, unknown>;
       if (clip[CLIP_MARK] && Array.isArray(clip.items) && clip.items.length) {
@@ -1850,6 +1903,11 @@ export class Editor {
         const only = this.selection.size === 1 ? this.store.get([...this.selection][0]) : undefined;
         if (only?.kind === 'frame') { handled(); this.editText(only.id, 'title'); }
         else if (only?.kind === 'image') { handled(); this.onOpenImage?.(only.id); }
+        else if (only?.kind === 'link') {
+          handled();
+          if (embedUrl(only.url)) this.onPlayEmbed?.(only.id);
+          else window.open(only.url, '_blank', 'noopener');
+        }
         else if (only?.kind === 'doc') { handled(); this.onOpenDoc?.(this.view.paths.toVault(only.file), e.shiftKey ? 'edit' : 'read'); }
         else if (only && isLine(only)) { handled(); this.editText(only.id, 'label'); }
         else if (hasText(only)) { handled(); this.editText(only.id, 'text'); }

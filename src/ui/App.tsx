@@ -20,6 +20,9 @@ import { ContextMenu, type MenuEntry } from './ContextMenu.tsx';
 import { ExportDialog } from './ExportDialog.tsx';
 import { StylesPanel } from './StylesPanel.tsx';
 import { HelpDialog } from './HelpDialog.tsx';
+import { SettingsDialog } from './SettingsDialog.tsx';
+import { EmbedPlayer } from './EmbedPlayer.tsx';
+import { embedUrl } from '../format/embed.ts';
 import { exportBoard, type ExportFormat, saveBlob } from '../render/export.ts';
 import type { Background, GridKind, StyleDef } from '../model/types.ts';
 import type { Rect } from '../render/geometry.ts';
@@ -128,6 +131,9 @@ export function App() {
   const [zoom, setZoom] = createSignal(1);
   const [showPerf, setShowPerf] = createSignal(false);
   const [help, setHelp] = createSignal(false);
+  const [settings, setSettings] = createSignal(false);
+  /** Видео, которое сейчас играет на доске. */
+  const [playing, setPlaying] = createSignal<string | null>(null);
   /** Панель досок свёрнута — выезжает поверх доски, когда мышь у левого края. Запоминается. */
   const [collapsed, setCollapsed] = createSignal(readFlag('vaultboard:sidebar-collapsed'));
   const [peek, setPeek] = createSignal(false);
@@ -310,6 +316,41 @@ export function App() {
     if (card) opened!.editor.focusItem(card.id);
   }
 
+  /** Развернуть ссылку в карточку. Сайт не ответил — карточка остаётся с адресом, можно обновить позже. */
+  async function unfurlLink(id: string, url: string) {
+    const board = opened?.session?.path ?? '';
+    try {
+      const data = await vault.unfurl(url, board);
+      opened?.editor.applyUnfurl(id, data);
+    } catch (err) {
+      let site = url;
+      try {
+        site = new URL(url).hostname.replace(/^www\./, '');
+      } catch {
+        // Адрес без хоста — оставим как есть.
+      }
+      opened?.editor.applyUnfurl(id, { url, site, title: site });
+      flash(`Сайт ${site} не ответил (${(err as Error).message}) — карточка с адресом; «Обновить карточку» в меню`);
+    }
+  }
+
+  /** Плеер видео поверх карточки: ездит вместе с доской (пересчитывается при каждом сдвиге камеры). */
+  function playerView(): { src: string; title: string; rect: Rect } | null {
+    const id = playing();
+    const cur = opened;
+    if (!id || !cur) return null;
+    zoom();
+    ui();
+    const item = cur.store.get(id);
+    if (item?.kind !== 'link') return null;
+    const src = embedUrl(item.url);
+    const r = cur.editor.screenRectOf(id);
+    if (!src || !r) return null;
+    // На экране — не меньше 320 точек в ширину, чтобы было что смотреть; пропорции 16:9.
+    const w = Math.max(r.w, 320);
+    return { src, title: item.title ?? item.url, rect: { x: r.x, y: r.y, w, h: w * 0.5625 } };
+  }
+
   // ---------- меню по правой кнопке ----------
 
   function setBackground(change: Partial<Background>) {
@@ -361,6 +402,16 @@ export function App() {
     }
     if (single && file?.kind === 'image') {
       items.push({ label: 'Открыть в просмотре', hint: 'Enter', action: () => openViewer(ui.selection[0]) }, 'sep');
+    }
+    const link = single ? ed.selectedLink() : null;
+    if (link) {
+      items.push(
+        ...(embedUrl(link.url) ? [{ label: 'Смотреть здесь', hint: 'Enter', action: () => setPlaying(link.id) } as MenuEntry] : []),
+        { label: embedUrl(link.url) ? 'Открыть в браузере' : 'Открыть ссылку', hint: embedUrl(link.url) ? undefined : 'Enter', action: () => window.open(link.url, '_blank', 'noopener') },
+        { label: 'Обновить карточку', action: () => void unfurlLink(link.id, link.url) },
+        { label: 'Копировать адрес', action: () => void navigator.clipboard.writeText(link.url) },
+        'sep',
+      );
     }
     items.push(
       { label: 'Вырезать', hint: 'Ctrl+X', action: () => ed.clipboardCommand('cut') },
@@ -471,6 +522,8 @@ export function App() {
     ed.onOpenDoc = (path, mode) => setPanel({ path, mode });
     ed.onCreateDoc = (at) => void createDoc(at);
     ed.onQuickOpen = () => setQuick(true);
+    ed.onUnfurl = (id, url) => void unfurlLink(id, url);
+    ed.onPlayEmbed = (id) => setPlaying(id);
     ed.onContextMenu = (e) => setMenu({ x: e.clientX, y: e.clientY, items: e.target ? objectMenu(e.at) : boardMenu(e.at) });
     const off = store.onChange((ops) => {
       v.apply(ops);
@@ -710,9 +763,16 @@ export function App() {
           <div class="notice">{notice()}</div>
         </Show>
         <div class="corner">
+          <button class="help-btn" title="Настройки" onClick={() => setSettings(true)}>⚙</button>
           <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
           <div class="zoom">{Math.round(zoom() * 100)}%</div>
         </div>
+        <Show when={playerView()}>
+          {(p) => <EmbedPlayer src={p().src} title={p().title} rect={p().rect} onClose={() => setPlaying(null)} />}
+        </Show>
+        <Show when={settings()}>
+          <SettingsDialog onClose={() => setSettings(false)} />
+        </Show>
         <Show when={help()}>
           <HelpDialog onClose={() => setHelp(false)} onBench={(n) => void openBench(n, true)} />
         </Show>

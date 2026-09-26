@@ -55,7 +55,16 @@ export interface DocItem extends Box { kind: 'doc'; file: string; subpath?: stri
 export interface ImageItem extends Box { kind: 'image'; file: string; pw?: number; ph?: number }
 /** Любой другой файл (pdf, видео…). */
 export interface FileItem extends Box { kind: 'file'; file: string }
-export interface LinkItem extends Box { kind: 'link'; url: string }
+/** Карточка ссылки как в Miro. Картинки (обложка, значок сайта) лежат в папке доски «ссылки/». */
+export interface LinkItem extends Box {
+  kind: 'link';
+  url: string;
+  title?: string;
+  description?: string;
+  site?: string;
+  image?: string;
+  favicon?: string;
+}
 
 /** Штрих рисунка. `pts` — точки в координатах рисунка, сжатые: см. format/strokes.ts. */
 export interface Stroke {

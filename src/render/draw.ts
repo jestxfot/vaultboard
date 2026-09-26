@@ -106,6 +106,7 @@ export function farColor(item: BoxItem): number {
     case 'text': return 0xd6d6d2;
     case 'image': return 0xd9d9d5;
     case 'drawing': return item.strokes[0] ? tint(item.strokes[0].color, 0.6) : 0xd6d6d2;
+    case 'link': return 0xf4f4f2;
     default: return item.color ? tint(item.color, 0.55) : 0xe4e4e0;
   }
 }
@@ -300,7 +301,8 @@ export function labelSpec(item: BoxItem): LabelSpec | null {
     case 'image':
       return { ...base, text: `🖼 ${basename(item.file)}`, fontSize: 15, align: 'center', vcenter: true };
     case 'link':
-      return { ...base, text: item.url, fontSize: 15, align: 'left', color: 0x2f5bd3 };
+      // Развёрнутую карточку (заголовок, обложка) рисует BoardView; пока её нет — просто адрес.
+      return item.title ? null : { ...base, text: item.url, fontSize: 15, align: 'left', color: 0x2f5bd3 };
     case 'frame':
     case 'drawing':
       return null;

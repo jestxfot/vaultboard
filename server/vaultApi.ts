@@ -11,6 +11,7 @@ import path from 'node:path';
 import { resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts';
 import { BoardFormatError, parseBoard } from '../src/format/board.ts';
 import { boardFolderOf, historyPathOf } from '../src/model/paths.ts';
+import { unfurl } from './unfurl.ts';
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -28,6 +29,17 @@ const MIME: Record<string, string> = {
 };
 
 const BOARD_FILE = /\.(board|canvas)$/i;
+
+/** Настройки этого компьютера (не доски): например, прокси для карточек ссылок. */
+const SETTINGS_FILE = path.join(process.env.LOCALAPPDATA ?? os.tmpdir(), 'vaultboard', 'settings.json');
+
+async function readSettings(): Promise<{ proxy?: string }> {
+  try {
+    return JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')) as { proxy?: string };
+  } catch {
+    return {};
+  }
+}
 
 /** Кэш превью фото — вне базы, чтобы не раздувать её и git. Можно удалить целиком: превью сделаются заново. */
 const PREVIEW_DIR = path.join(process.env.LOCALAPPDATA ?? os.tmpdir(), 'vaultboard', 'cache', 'previews');
@@ -262,6 +274,35 @@ export function vaultApi(root: string): Plugin {
         await fs.writeFile(tmp, Buffer.concat(chunks));
         await fs.rename(tmp, file);
         return sendJson(res, 200, { ok: true });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/unfurl') {
+      // Карточка ссылки: сервер читает страницу, картинки кладёт в папку доски «ссылки/».
+      const body = JSON.parse(await readBody(req)) as { url: string; board: string };
+      const folder = /\.board$/i.test(body.board ?? '') ? boardFolderOf(body.board) : '';
+      try {
+        // Как браузер: через прокси из настроек, иначе через системный (HTTPS_PROXY); не вышло — напрямую.
+        const proxy = (await readSettings()).proxy || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || undefined;
+        try {
+          return sendJson(res, 200, await unfurl(absRoot, folder, body.url, proxy));
+        } catch (err) {
+          if (!proxy) throw err;
+          return sendJson(res, 200, await unfurl(absRoot, folder, body.url, undefined));
+        }
+      } catch (err) {
+        return sendJson(res, 422, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    if (url.pathname === '/settings') {
+      if (req.method === 'GET') return sendJson(res, 200, await readSettings());
+      if (req.method === 'PUT') {
+        const next = JSON.parse(await readBody(req)) as { proxy?: string };
+        if (next.proxy) new URL(next.proxy);
+        await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
+        await fs.writeFile(SETTINGS_FILE, JSON.stringify(next, null, 1), 'utf8');
+        return sendJson(res, 200, next);
       }
     }
 

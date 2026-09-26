@@ -100,6 +100,21 @@ export const vault = {
     await fetch('/api/library', { method: 'PUT', body: JSON.stringify(styles, null, 1) });
   },
 
+  /** Развернуть ссылку в карточку: заголовок, описание, сайт, обложка и значок (картинки — в папку доски). */
+  async unfurl(url: string, board: string): Promise<{ url: string; title?: string; description?: string; site?: string; image?: string; favicon?: string }> {
+    const res = await fetch('/api/unfurl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, board }) });
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) throw new Error(body.error ?? 'Сайт не ответил');
+    return body as { url: string };
+  },
+
+  getSettings: () => request<{ proxy?: string }>('/api/settings'),
+
+  async putSettings(settings: { proxy?: string }): Promise<void> {
+    const res = await fetch('/api/settings', { method: 'PUT', body: JSON.stringify(settings) });
+    if (!res.ok) throw new Error('Не удалось сохранить настройки — проверь адрес прокси');
+  },
+
   resolve: (from: string, refs: string[]) =>
     request<Record<string, string | null>>('/api/resolve', {
       method: 'POST',

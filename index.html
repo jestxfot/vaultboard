@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>vaultboard</title>
+    <script>
+      // YouTube не показывает встроенное видео на странице с адресом-цифрами (127.0.0.1): открываем то же самое как localhost.
+      if (location.hostname === '127.0.0.1' || location.hostname === '[::1]') location.replace(location.href.replace(location.hostname, 'localhost'));
+    </script>
   </head>
   <body>
     <div id="root"></div>

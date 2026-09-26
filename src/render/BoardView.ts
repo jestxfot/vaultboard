@@ -9,9 +9,9 @@
 // - полноценные фигуры и тексты строятся очередью с лимитом на кадр, чтобы не было рывков.
 //   Пока объект строится, на его месте виден цветной прямоугольник — дыр не бывает;
 // - правки применяются точечно: меняется только тронутый объект и прицепленные к нему линии.
-import { Application, Container, Graphics, HTMLText, Rectangle, RenderTexture, Sprite, Text, Texture, TilingSprite } from 'pixi.js';
+import { Application, CanvasTextMetrics, Container, Graphics, HTMLText, Rectangle, RenderTexture, Sprite, Text, Texture, TilingSprite } from 'pixi.js';
 import RBush from 'rbush';
-import type { Background, BoardDoc, BoxItem, DocItem, ImageItem, Item, LineItem } from '../model/types.ts';
+import type { Background, BoardDoc, BoxItem, DocItem, ImageItem, Item, LineItem, LinkItem } from '../model/types.ts';
 import { resolveLook } from '../model/look.ts';
 import { hexToNum, isDark } from '../format/colors.ts';
 import type { DocCache } from '../io/files.ts';
@@ -23,6 +23,7 @@ import type { PerfMonitor } from '../perf/monitor.ts';
 import { dashPattern, dashPolyline, drawBox, drawLine, farColor, FONT, labelSpec, type LabelSpec, makeLabel } from './draw.ts';
 import { ImageCache, type Level } from './images.ts';
 import { ensureFont } from './fonts.ts';
+import { embedUrl } from '../format/embed.ts';
 import { endpointCenter, geomBounds, type LineGeom, lineGeometry, lineMidpoint, type Rect, resolveAnchor, samplePath } from './geometry.ts';
 
 export interface Camera {
@@ -113,6 +114,8 @@ class ItemView {
   photo: Sprite | null = null;
   /** Ступень масштаба, под которую построена линия (её видимая толщина). */
   lineStep = 0;
+  /** Развёрнутая карточка ссылки: обложка, значок, сайт, заголовок, описание. */
+  linkUi: Container | null = null;
   /** Маленький снимок объекта с текстом — показывается издалека вместо серого прямоугольника. */
   snapshot: Texture | null = null;
   /** Текст документа на карточке (отформатированный markdown). */
@@ -452,6 +455,102 @@ export class BoardView {
     v.body = null;
   }
 
+  /** Файлы, которые показывает объект (фото, заметка, картинки карточки ссылки) — пути от корня базы. */
+  private filesOf(item: Item): string[] {
+    if (item.kind === 'image' || item.kind === 'doc') return [this.paths.toVault(item.file)];
+    if (item.kind === 'link') return [item.image, item.favicon].filter((f): f is string => !!f).map((f) => this.paths.toVault(f));
+    return [];
+  }
+
+  /**
+   * Карточка ссылки как в Miro: обложка сверху, ниже значок и название сайта, заголовок и описание.
+   * Картинки берутся из кэша фото (они лежат в папке доски) и подставляются, когда загрузятся.
+   */
+  private buildLinkCard(v: ItemView, item: LinkItem): void {
+    const ui = new Container();
+    const pad = 14;
+    const coverH = item.image ? Math.round(item.w * 0.52) : 0;
+    let y = coverH + 12;
+    const res = this.labelResolution();
+    if (item.image) {
+      const cover = new Sprite(Texture.WHITE);
+      cover.tint = 0xe9e9e6;
+      cover.label = 'cover';
+      cover.setSize(item.w, coverH);
+      ui.addChild(cover);
+      // Видео — кнопка ▶ посередине обложки: двойной щелчок запускает его прямо на доске.
+      if (embedUrl(item.url)) {
+        const play = new Graphics();
+        const cx = item.w / 2, cy = coverH / 2, r = Math.min(34, coverH / 5);
+        play.roundRect(cx - r * 1.4, cy - r, r * 2.8, r * 2, r * 0.6).fill({ color: 0xff0033, alpha: 0.92 });
+        play.poly([cx - r * 0.35, cy - r * 0.5, cx - r * 0.35, cy + r * 0.5, cx + r * 0.55, cy]).fill(0xffffff);
+        ui.addChild(play);
+      }
+    }
+    const favicon = new Sprite(Texture.WHITE);
+    favicon.label = 'favicon';
+    favicon.tint = 0xdedede;
+    favicon.position.set(pad, y);
+    favicon.setSize(16, 16);
+    ui.addChild(favicon);
+    const site = new Text({ text: item.site ?? '', style: { fontFamily: FONT, fontSize: 12, fill: 0x6b6b6b }, resolution: res });
+    site.position.set(pad + 22, y);
+    ui.addChild(site);
+    y += 24;
+    const title = new Text({
+      text: item.title ?? item.url,
+      style: { fontFamily: FONT, fontSize: 15, fontWeight: '700', fill: 0x1f1f1f, wordWrap: true, breakWords: true, wordWrapWidth: item.w - pad * 2, lineHeight: 20 },
+      resolution: res,
+    });
+    this.clampLines(title, 2);
+    title.position.set(pad, y);
+    ui.addChild(title);
+    y += title.height + 6;
+    if (item.description && y < item.h - 20) {
+      const desc = new Text({
+        text: item.description,
+        style: { fontFamily: FONT, fontSize: 13, fill: 0x6b6b6b, wordWrap: true, breakWords: true, wordWrapWidth: item.w - pad * 2, lineHeight: 18 },
+        resolution: res,
+      });
+      this.clampLines(desc, Math.max(1, Math.floor((item.h - y - 10) / 18)));
+      desc.position.set(pad, y);
+      ui.addChild(desc);
+    }
+    v.linkUi = ui;
+    v.container.addChild(ui);
+    this.updateLinkImages(v);
+  }
+
+  /** Обрезать текст до числа строк с «…». */
+  private clampLines(t: Text, lines: number): void {
+    const style = t.style as unknown as import('pixi.js').TextStyle;
+    const m = CanvasTextMetrics.measureText(t.text, style);
+    if (m.lines.length <= lines) return;
+    const kept = m.lines.slice(0, lines);
+    kept[lines - 1] = `${kept[lines - 1].replace(/\s*\S{0,3}$/, '')}…`;
+    t.text = kept.join('\n');
+  }
+
+  private updateLinkImages(v: ItemView): void {
+    const item = v.item as LinkItem;
+    const ui = v.linkUi;
+    if (!ui) return;
+    const set = (name: string, file: string | undefined, level: Level, w: number, h: number) => {
+      const sprite = ui.getChildByLabel(name) as Sprite | null;
+      if (!sprite || !file) return;
+      const path = this.paths.toVault(file);
+      this.images.request(path, level);
+      const best = this.images.best(path, level);
+      if (best && sprite.texture !== best.tex) {
+        sprite.texture = best.tex;
+        sprite.tint = 0xffffff;
+        sprite.setSize(w, h);
+      }
+    };
+    set('cover', item.image, 1, item.w, Math.round(item.w * 0.52));
+    set('favicon', item.favicon, 0, 16, 16);
+  }
+
   /** Шрифт загрузился — перерисовать все надписи им. */
   private refreshFont(font: string): void {
     for (const v of this.views.values()) {
@@ -484,7 +583,7 @@ export class BoardView {
   /** Снять маленькую картинку объекта вместе с текстом — для вида издалека. */
   private makeSnapshot(v: ItemView): void {
     if (v.snapshot || isLine(v.item) || !v.gfx?.visible || !this.visible.has(v)) return;
-    if (!v.label?.visible && !v.body?.visible) return;
+    if (!v.label?.visible && !v.body?.visible && !v.linkUi?.visible) return;
     const item = v.item;
     const res = Math.min(2, SNAPSHOT_PX / Math.max(item.w, item.h, 1));
     const farWas = v.far?.visible;
@@ -514,8 +613,7 @@ export class BoardView {
     const wait = ensureFont(font);
     if (wait && font) void wait.then(() => this.refreshFont(font));
     this.views.set(item.id, v);
-    if (item.kind === 'image' || item.kind === 'doc') {
-      const file = this.paths.toVault(item.file);
+    for (const file of this.filesOf(item)) {
       let set = this.fileViews.get(file);
       if (!set) this.fileViews.set(file, (set = new Set()));
       set.add(v);
@@ -548,7 +646,7 @@ export class BoardView {
       v.snapshot = null;
       this.snapshotCount--;
     }
-    if (v.item.kind === 'image' || v.item.kind === 'doc') this.fileViews.get(this.paths.toVault(v.item.file))?.delete(v);
+    for (const file of this.filesOf(v.item)) this.fileViews.get(file)?.delete(v);
     // Текстуры фото общие и живут в кэше — спрайт уничтожается без них.
     v.container.destroy({ children: true });
   }
@@ -837,6 +935,10 @@ export class BoardView {
         : Math.min(item.w, item.h) * zoom >= NEAR_PX && (textReadable || !v.snapshot);
     if (wantNear && v.gfx) {
       v.gfx.visible = true;
+      if (v.linkUi) {
+        v.linkUi.visible = true;
+        this.updateLinkImages(v);
+      }
       if (v.far) v.far.visible = false;
       this.updateLabel(v);
       return;
@@ -851,6 +953,7 @@ export class BoardView {
     if (v.gfx) v.gfx.visible = false;
     if (v.label) v.label.visible = false;
     if (v.body) v.body.visible = false;
+    if (v.linkUi) v.linkUi.visible = false;
     if (wantNear) this.nearQueue.set(v, () => this.buildNear(v));
   }
 
@@ -922,6 +1025,14 @@ export class BoardView {
       }
     } else {
       drawBox(g, this.look(item));
+      if (item.kind === 'link' && item.title) {
+        v.gfx = g;
+        v.container.addChildAt(g, v.far ? 1 : 0);
+        this.nearCount++;
+        this.buildLinkCard(v, item);
+        this.updateDetail(v);
+        return;
+      }
     }
     v.gfx = g;
     // Ближний вид — над дальним, но под текстом и заголовком.
@@ -1090,7 +1201,7 @@ export class BoardView {
     this.images.evict(photosInUse);
     for (const v of this.visible) {
       if (v.snapshot || isLine(v.item) || v.item.kind === 'frame' || v.item.kind === 'image' || v.item.kind === 'drawing') continue;
-      if (v.label?.visible || v.body?.visible) this.miscQueue.set(`snap:${v.item.id}`, () => this.makeSnapshot(v));
+      if (v.label?.visible || v.body?.visible || v.linkUi?.visible) this.miscQueue.set(`snap:${v.item.id}`, () => this.makeSnapshot(v));
     }
     if (this.snapshotCount > MAX_SNAPSHOTS) {
       for (const v of this.views.values()) {
