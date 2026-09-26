@@ -186,12 +186,10 @@ export function DocPanel(props: {
         <Show
           when={okTarget()}
           fallback={
-            <Show when={target()}>
+            <Show when={target()?.kind === 'outside'}>
               <span
                 class="doc-btn disabled"
-                title={target()!.kind === 'no-obsidian'
-                  ? 'Obsidian на этом компьютере не найден'
-                  : 'Эта заметка не лежит ни в одном хранилище Obsidian — он её не откроет. Добавь её папку как хранилище в Obsidian.'}
+                title="Эта заметка не лежит ни в одном хранилище Obsidian — он её не откроет. Добавь её папку как хранилище в Obsidian."
               >
                 Obsidian
               </span>

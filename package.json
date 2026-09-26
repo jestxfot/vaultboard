@@ -10,7 +10,9 @@
     "build": "vite build",
     "stable": "vite build && vite preview --port 5180 --strictPort",
     "check": "tsc --noEmit",
-    "test": "node scripts/test-format.ts && node scripts/test-store.ts"
+    "test": "node scripts/test-format.ts && node scripts/test-store.ts",
+    "update": "node scripts/update.mjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",

@@ -12,6 +12,7 @@ import { resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts
 import { BoardFormatError, parseBoard } from '../src/format/board.ts';
 import { boardFolderOf, historyPathOf } from '../src/model/paths.ts';
 import { unfurl } from './unfurl.ts';
+import { currentVersion, isGitCheckout, isNewer, latestRelease, type Release, settingsFile } from '../scripts/update.mjs';
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -30,8 +31,8 @@ const MIME: Record<string, string> = {
 
 const BOARD_FILE = /\.(board|canvas)$/i;
 
-/** Настройки этого компьютера (не доски): например, прокси для карточек ссылок. */
-const SETTINGS_FILE = path.join(process.env.LOCALAPPDATA ?? os.tmpdir(), 'vaultboard', 'settings.json');
+/** Настройки этого компьютера (не доски): папка с досками, имя, прокси, автообновление. */
+const SETTINGS_FILE = settingsFile();
 
 /**
  * Хранилища, которые знает Obsidian на этом компьютере (его собственный список в obsidian.json).
@@ -59,14 +60,45 @@ interface Settings {
   proxy?: string;
   /** Имя в комментариях. */
   author?: string;
+  /** Папка с досками и заметками (корень базы). */
+  vaultRoot?: string;
+  /** Обновляться на новые релизы при запуске. Нет поля — да. */
+  autoUpdate?: boolean;
 }
 
+/** Настройки читаются на каждый запрос (нужна папка базы) — держим в памяти, перечитываем после записи. */
+let settingsCache: Settings | null = null;
+
 async function readSettings(): Promise<Settings> {
+  if (settingsCache) return settingsCache;
   try {
-    return JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')) as Settings;
+    settingsCache = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')) as Settings;
   } catch {
-    return {};
+    settingsCache = {};
   }
+  return settingsCache;
+}
+
+async function writeSettings(next: Settings): Promise<void> {
+  await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
+  await fs.writeFile(SETTINGS_FILE, JSON.stringify(next, null, 1), 'utf8');
+  settingsCache = next;
+}
+
+/** Диски компьютера (на Windows) или корень файловой системы — начало просмотра папок. */
+async function fsRoots(): Promise<{ name: string; path: string }[]> {
+  if (process.platform !== 'win32') return [{ name: '/', path: '/' }];
+  const letters = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+  const found = await Promise.all(letters.map(async (l) => ((await fs.stat(`${l}:\\`).catch(() => null)) ? l : null)));
+  return found.filter((l): l is string => !!l).map((l) => ({ name: `${l}:`, path: `${l}:\\` }));
+}
+
+/** Последний релиз с GitHub — спрашиваем не чаще раза в час. */
+let releaseCache: { at: number; release: Release | null } | null = null;
+async function cachedRelease(force = false): Promise<Release | null> {
+  if (!force && releaseCache && Date.now() - releaseCache.at < 3_600_000) return releaseCache.release;
+  releaseCache = { at: Date.now(), release: await latestRelease() };
+  return releaseCache.release;
 }
 
 /** Кэш превью фото — вне базы, чтобы не раздувать её и git. Можно удалить целиком: превью сделаются заново. */
@@ -106,11 +138,118 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export function vaultApi(root: string): Plugin {
-  const absRoot = path.resolve(root);
+/**
+ * `fixedRoot` — папка базы из переменной VAULT_ROOT (для разработки). Нет её — берётся из настроек компьютера,
+ * а пока её не выбрали, работают только запросы первой настройки: приложение показывает окно выбора папки.
+ */
+export function vaultApi(fixedRoot?: string): Plugin {
+  const envRoot = fixedRoot ? path.resolve(fixedRoot) : null;
+  /** Папка проекта — задаётся при старте сервера (там же лежит package.json с версией). */
+  let projectDir = process.cwd();
+
+  async function currentRoot(): Promise<string | null> {
+    if (envRoot) return envRoot;
+    const s = await readSettings();
+    return s.vaultRoot ? path.resolve(s.vaultRoot) : null;
+  }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
+
+    // ---------- первая настройка: работает и без выбранной папки ----------
+
+    if (req.method === 'GET' && url.pathname === '/setup') {
+      // Что предложить: хранилища Obsidian (если он есть) и «Документы/vaultboard».
+      const vaults = (await obsidianVaults()) ?? [];
+      const docs = path.join(os.homedir(), 'Documents', 'vaultboard');
+      const suggestions: { path: string; kind: 'obsidian' | 'new' | 'folder' }[] = [];
+      for (const v of vaults) if (await fs.stat(v).catch(() => null)) suggestions.push({ path: v, kind: 'obsidian' });
+      suggestions.push({ path: docs, kind: (await fs.stat(docs).catch(() => null)) ? 'folder' : 'new' });
+      return sendJson(res, 200, {
+        root: await currentRoot(),
+        fixed: !!envRoot,
+        defaultAuthor: os.userInfo().username,
+        obsidian: vaults.length > 0,
+        suggestions,
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/fs/dirs') {
+      // Просмотр папок для выбора корня базы. Сервер слушает только этот компьютер — чужим он не виден.
+      const p = url.searchParams.get('path') ?? '';
+      if (!p) return sendJson(res, 200, { path: '', parent: null, dirs: await fsRoots(), home: os.homedir() });
+      const abs = path.resolve(p);
+      const entries = await fs.readdir(abs, { withFileTypes: true }).catch(() => null);
+      if (!entries) return sendJson(res, 404, { error: 'Папку не открыть' });
+      const dirs = entries
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('$') && e.name !== 'node_modules')
+        .map((e) => ({ name: e.name, path: path.join(abs, e.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      const up = path.dirname(abs);
+      return sendJson(res, 200, { path: abs, parent: up === abs ? '' : up, dirs, home: os.homedir() });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/fs/mkdir') {
+      const body = JSON.parse(await readBody(req)) as { parent: string; name: string };
+      const name = safeName(body.name ?? '').trim();
+      if (!name) return sendJson(res, 400, { error: 'Пустое имя папки' });
+      const abs = path.join(path.resolve(body.parent), name);
+      await fs.mkdir(abs, { recursive: true });
+      return sendJson(res, 200, { path: abs });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/update') {
+      // Вышел ли новый релиз. Копия из git обновляется через git — ей только показываем версию.
+      const git = isGitCheckout(projectDir);
+      const current = currentVersion(projectDir);
+      const release = await cachedRelease(url.searchParams.has('force'));
+      const enabled = (await readSettings()).autoUpdate !== false;
+      return sendJson(res, 200, {
+        current,
+        git,
+        enabled,
+        latest: release,
+        available: !!release && isNewer(release.tag, current),
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/obsidian-vaults') {
+      // Читаем каждый раз: хранилище могли только что добавить в Obsidian.
+      return sendJson(res, 200, { root: (await currentRoot()) ?? '', vaults: await obsidianVaults() });
+    }
+
+    if (url.pathname === '/settings') {
+      // Имя по умолчанию — имя пользователя системы, пока автор не впишет своё.
+      if (req.method === 'GET') return sendJson(res, 200, { ...(await readSettings()), defaultAuthor: os.userInfo().username, fixedRoot: envRoot });
+      if (req.method === 'PUT') {
+        // Меняются только присланные поля; пустая строка — убрать поле.
+        const raw = JSON.parse(await readBody(req)) as Settings & { createRoot?: boolean };
+        const next: Settings = { ...(await readSettings()) };
+        if ('proxy' in raw) {
+          if (raw.proxy) next.proxy = String(new URL(raw.proxy)).replace(/\/$/, '');
+          else delete next.proxy;
+        }
+        if ('author' in raw) {
+          if (raw.author?.trim()) next.author = raw.author.trim().slice(0, 60);
+          else delete next.author;
+        }
+        if ('autoUpdate' in raw) next.autoUpdate = raw.autoUpdate !== false;
+        if (raw.vaultRoot) {
+          const abs = path.resolve(raw.vaultRoot);
+          if (raw.createRoot) await fs.mkdir(abs, { recursive: true });
+          const st = await fs.stat(abs).catch(() => null);
+          if (!st?.isDirectory()) return sendJson(res, 400, { error: `Нет такой папки: ${abs}` });
+          next.vaultRoot = abs;
+        }
+        await writeSettings(next);
+        return sendJson(res, 200, next);
+      }
+    }
+
+    // ---------- дальше — всё, что работает с папкой базы ----------
+
+    const absRoot = await currentRoot();
+    if (!absRoot) return sendJson(res, 409, { error: 'Сначала выбери папку с досками', setup: true });
 
     if (req.method === 'GET' && url.pathname === '/boards') {
       const boards = [];
@@ -323,25 +462,6 @@ export function vaultApi(root: string): Plugin {
       }
     }
 
-    if (req.method === 'GET' && url.pathname === '/obsidian-vaults') {
-      // Читаем каждый раз: хранилище могли только что добавить в Obsidian.
-      return sendJson(res, 200, { root: path.resolve(absRoot), vaults: await obsidianVaults() });
-    }
-
-    if (url.pathname === '/settings') {
-      // Имя по умолчанию — имя пользователя Windows, пока автор не впишет своё.
-      if (req.method === 'GET') return sendJson(res, 200, { ...(await readSettings()), defaultAuthor: os.userInfo().username });
-      if (req.method === 'PUT') {
-        const raw = JSON.parse(await readBody(req)) as Settings;
-        const next: Settings = {};
-        if (raw.proxy) next.proxy = String(new URL(raw.proxy)).replace(/\/$/, '');
-        if (raw.author?.trim()) next.author = raw.author.trim().slice(0, 60);
-        await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
-        await fs.writeFile(SETTINGS_FILE, JSON.stringify(next, null, 1), 'utf8');
-        return sendJson(res, 200, next);
-      }
-    }
-
     if (url.pathname === '/library') {
       // Общая библиотека стилей базы — чтобы переносить удачные стили между досками.
       const abs = toAbsolute(absRoot, '.vaultboard/стили.json');
@@ -381,11 +501,13 @@ export function vaultApi(root: string): Plugin {
   return {
     name: 'vaultboard-vault-api',
     configureServer(server) {
+      projectDir = server.config.root;
       server.middlewares.use('/api', api);
     },
     // Стабильная копия (npm run stable): собранное приложение с тем же доступом к базе.
     // Её не перезагружают правки кода — на ней можно спокойно работать, пока идёт разработка.
     configurePreviewServer(server) {
+      projectDir = server.config.root;
       server.middlewares.use('/api', api);
     },
   };

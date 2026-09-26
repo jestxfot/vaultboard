@@ -22,6 +22,8 @@ import { StylesPanel } from './StylesPanel.tsx';
 import { LayersPanel } from './LayersPanel.tsx';
 import { HelpDialog } from './HelpDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
+import { SetupDialog } from './SetupDialog.tsx';
+import type { Settings, SetupInfo, UpdateStatus } from '../io/vault.ts';
 import { EmbedLayer } from './EmbedLayer.ts';
 import { CommentsLayer } from './CommentsLayer.ts';
 import { ThreadPopover } from './ThreadPopover.tsx';
@@ -143,6 +145,14 @@ export function App() {
   const [showPerf, setShowPerf] = createSignal(false);
   const [help, setHelp] = createSignal(false);
   const [settings, setSettings] = createSignal(false);
+  /** Первая настройка: папка с досками ещё не выбрана. */
+  const [setup, setSetup] = createSignal<SetupInfo | null>(null);
+  /** Мастер открыт повторно (не первая настройка) — его можно закрыть, текущие значения подставлены. */
+  const [wizardAgain, setWizardAgain] = createSignal<Settings | null>(null);
+  /** Вышел новый релиз — показываем плашку (её можно закрыть). */
+  const [update, setUpdate] = createSignal<UpdateStatus | null>(null);
+  /** Плашку о новой версии закрыли — отметка у номера версии в панели остаётся. */
+  const [updateBanner, setUpdateBanner] = createSignal(true);
   /** Панель досок свёрнута — выезжает поверх доски, когда мышь у левого края. Запоминается. */
   const [collapsed, setCollapsed] = createSignal(readFlag('vaultboard:sidebar-collapsed'));
   const [peek, setPeek] = createSignal(false);
@@ -385,6 +395,17 @@ export function App() {
       'sep',
       { label: 'Стили доски…', action: () => setStylesOpen(true) },
     ];
+  }
+
+  /** Открыть мастер настройки ещё раз — щелчком по логотипу в панели досок. */
+  async function openWizard() {
+    try {
+      const [info, s] = await Promise.all([vault.setup(), vault.getSettings()]);
+      setWizardAgain(s);
+      setSetup(info);
+    } catch (err) {
+      setError((err as Error).message);
+    }
   }
 
   function setHideDone(hide: boolean) {
@@ -728,8 +749,14 @@ export function App() {
       if ((openThread() || draft()) && !(e.target as HTMLElement).closest('.comment-pin')) closeThread();
     }, true);
     v.setDocs(docs, markdown);
-    void files.refresh();
-    void vault.getLibrary().then(setLibrary).catch(() => undefined);
+    // Папка с досками ещё не выбрана (новый компьютер) — сначала первая настройка, остальное после неё.
+    const info = await vault.setup().catch(() => null);
+    if (info && !info.root) setSetup(info);
+    else {
+      void files.refresh().catch(() => undefined);
+      void vault.getLibrary().then(setLibrary).catch(() => undefined);
+    }
+    void vault.updateStatus().then((u) => { if (u.available) setUpdate(u); }, () => undefined);
     if (import.meta.env.DEV) Object.assign(window, { __view: v, __docs: docs, __files: files });
 
     const onKey = (e: KeyboardEvent) => {
@@ -758,7 +785,7 @@ export function App() {
     });
 
     const params = new URLSearchParams(location.search);
-    await refreshBoards().catch((err: Error) => setError(err.message));
+    if (!setup()) await refreshBoards().catch((err: Error) => setError(err.message));
     if (params.get('bench')) await openBench(Number(params.get('bench')), params.get('auto') === '1');
     else if (params.get('open')) await openBoard(params.get('open')!);
     else await mount(emptyBoard(), null, 'new', 'Черновик (не сохраняется) — создай или открой доску слева', performance.now());
@@ -772,11 +799,18 @@ export function App() {
         onMouseLeave={() => collapsed() && setPeek(false)}
       >
         <div class="side-head">
-          <span class="logo">vb</span>
-          <div class="side-title">
-            <b>vaultboard</b>
-            <span class="root" title={root()}>{root()}</span>
-          </div>
+          <button class="side-brand" title="Мастер настройки: папка с досками, имя, обновления" onClick={() => void openWizard()}>
+            <span class="logo">vb</span>
+            <span class="side-title">
+              <b>
+                vaultboard <span class="side-version" title="Версия приложения">v{__APP_VERSION__}</span>
+                <Show when={update()}>
+                  {(u) => <span class="side-update" title={`Вышла ${u().latest!.tag} — поставится при следующем запуске`}>↑ {u().latest!.tag}</span>}
+                </Show>
+              </b>
+              <span class="root" title={root()}>{root()}</span>
+            </span>
+          </button>
           <button class="icon-btn" title={collapsed() ? 'Закрепить панель' : 'Свернуть панель — она будет выезжать у левого края'} onClick={toggleSidebar}>
             {collapsed() ? '📌' : '⟨'}
           </button>
@@ -900,6 +934,42 @@ export function App() {
           <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
           <div class="zoom">{Math.round(zoom() * 100)}%</div>
         </div>
+        <Show when={setup()}>
+          {(info) => (
+            <SetupDialog
+              info={info()}
+              current={wizardAgain()}
+              onCancel={wizardAgain() ? () => { setSetup(null); setWizardAgain(null); } : undefined}
+              onDone={(rootChanged) => {
+                const again = wizardAgain();
+                setSetup(null);
+                setWizardAgain(null);
+                // Повторный запуск сменил папку — открыть приложение заново с новыми досками.
+                if (again && rootChanged) {
+                  location.reload();
+                  return;
+                }
+                void refreshBoards().catch((err: Error) => setError(err.message));
+                void files.refresh().catch(() => undefined);
+                void vault.getLibrary().then(setLibrary).catch(() => undefined);
+                void vault.getSettings().then((s) => setAuthor(s.author || s.defaultAuthor || 'Я'), () => undefined);
+                flash(again ? 'Настройки сохранены' : 'Готово. Создай первую доску кнопкой «+» слева');
+              }}
+            />
+          )}
+        </Show>
+        <Show when={updateBanner() && update()}>
+          {(u) => (
+            <div class="update-banner">
+              <span>
+                Вышла версия <b>{u().latest!.tag}</b>
+                {u().git ? ' — у тебя копия из git: git pull' : u().enabled ? ' — поставится при следующем запуске vaultboard.vbs' : ' — автообновление выключено в настройках'}
+              </span>
+              <a href={u().latest!.url} target="_blank" rel="noopener">Что нового</a>
+              <button onClick={() => setUpdateBanner(false)} title="Скрыть">×</button>
+            </div>
+          )}
+        </Show>
         <Show when={settings()}>
           <SettingsDialog onClose={() => setSettings(false)} onSaved={(s) => s.author && setAuthor(s.author)} />
         </Show>

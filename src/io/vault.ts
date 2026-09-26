@@ -17,6 +17,40 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface Settings {
+  proxy?: string;
+  author?: string;
+  vaultRoot?: string;
+  autoUpdate?: boolean;
+  /** Имя пользователя системы — имя в комментариях по умолчанию. */
+  defaultAuthor?: string;
+  /** Папка базы задана переменной VAULT_ROOT (разработка) — в настройках её не поменять. */
+  fixedRoot?: string | null;
+}
+
+export interface SetupInfo {
+  root: string | null;
+  fixed: boolean;
+  defaultAuthor: string;
+  obsidian: boolean;
+  suggestions: { path: string; kind: 'obsidian' | 'new' | 'folder' }[];
+}
+
+export interface DirList {
+  path: string;
+  parent: string | null;
+  dirs: { name: string; path: string }[];
+  home: string;
+}
+
+export interface UpdateStatus {
+  current: string;
+  git: boolean;
+  enabled: boolean;
+  latest: { tag: string; name: string; notes: string; url: string } | null;
+  available: boolean;
+}
+
 export const vault = {
   listBoards: () => request<{ root: string; boards: BoardEntry[] }>('/api/boards'),
 
@@ -111,12 +145,23 @@ export const vault = {
   /** Хранилища Obsidian на этом компьютере; null — Obsidian не установлен. */
   obsidianVaults: () => request<{ root: string; vaults: string[] | null }>('/api/obsidian-vaults'),
 
-  getSettings: () => request<{ proxy?: string; author?: string; defaultAuthor?: string }>('/api/settings'),
+  getSettings: () => request<Settings>('/api/settings'),
 
-  async putSettings(settings: { proxy?: string; author?: string }): Promise<void> {
-    const res = await fetch('/api/settings', { method: 'PUT', body: JSON.stringify(settings) });
-    if (!res.ok) throw new Error('Не удалось сохранить настройки — проверь адрес прокси');
+  /** Меняются только присланные поля; пустая строка — убрать поле. */
+  async putSettings(settings: Partial<Omit<Settings, 'defaultAuthor' | 'fixedRoot'>> & { createRoot?: boolean }): Promise<void> {
+    await request('/api/settings', { method: 'PUT', body: JSON.stringify(settings) });
   },
+
+  /** Первая настройка: выбрана ли папка с досками и что предложить. */
+  setup: () => request<SetupInfo>('/api/setup'),
+
+  /** Папки внутри `path` (пусто — диски компьютера). */
+  dirs: (path: string) => request<DirList>(`/api/fs/dirs?path=${encodeURIComponent(path)}`),
+
+  mkdir: (parent: string, name: string) => request<{ path: string }>('/api/fs/mkdir', { method: 'POST', body: JSON.stringify({ parent, name }) }),
+
+  /** Вышел ли новый релиз на GitHub. `force` — спросить GitHub сейчас, а не взять ответ часовой давности. */
+  updateStatus: (force = false) => request<UpdateStatus>(`/api/update${force ? '?force' : ''}`),
 
   resolve: (from: string, refs: string[]) =>
     request<Record<string, string | null>>('/api/resolve', {
