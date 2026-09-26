@@ -58,5 +58,24 @@ sh(`git commit -q -m "Релиз ${tag}"`);
 sh(`git tag -a ${tag} -m "Релиз ${tag}"`);
 sh('git push');
 sh(`git push origin ${tag}`);
-execSync(`gh release create ${tag} release/vaultboard.zip --title "vaultboard ${tag}" --notes-file -`, { cwd: dir, input: notes, stdio: ['pipe', 'inherit', 'inherit'] });
+// Связь с GitHub иногда рвётся («unexpected EOF») — пробуем до трёх раз; если релиз успел создаться, второй не делаем.
+const exists = () => {
+  try {
+    out(`gh release view ${tag} --json tagName`);
+    return true;
+  } catch {
+    return false;
+  }
+};
+for (let attempt = 1; ; attempt++) {
+  try {
+    execSync(`gh release create ${tag} release/vaultboard.zip --title "vaultboard ${tag}" --notes-file -`, { cwd: dir, input: notes, stdio: ['pipe', 'inherit', 'inherit'] });
+    break;
+  } catch (err) {
+    if (exists()) break;
+    if (attempt >= 3) throw err;
+    console.log(`Создать релиз не вышло (попытка ${attempt}), пробую ещё раз…`);
+    execSync(process.platform === 'win32' ? 'timeout /t 5 >nul' : 'sleep 5', { stdio: 'ignore', shell: true });
+  }
+}
 console.log(`\n✓ Релиз ${tag} опубликован: https://github.com/jestxfot/vaultboard/releases/tag/${tag}`);

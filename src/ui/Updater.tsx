@@ -14,11 +14,18 @@ import { type UpdateStatus, vault } from '../io/vault.ts';
 /** Сколько без действий, чтобы обновиться самому. */
 const IDLE_MS = 60_000;
 
+/** Событие «проверь обновления сейчас» — его шлёт щелчок по номеру версии в шапке. */
+export const CHECK_UPDATE_EVENT = 'vaultboard:check-update';
+
 export function Updater(props: {
   /** Сохранить всё несохранённое перед перезапуском. */
   beforeRestart: () => Promise<void>;
   /** Сообщить приложению о новой версии (отметка у номера версии в панели). */
   onStatus: (u: UpdateStatus | null) => void;
+  /** Короткое сообщение внизу («у тебя последняя версия»). */
+  onNotice: (text: string) => void;
+  /** Версия, которую сообщил сервер (номер в шапке — по ней, а не только по вшитому при сборке). */
+  onVersion?: (current: string) => void;
 }) {
   const [status, setStatus] = createSignal<UpdateStatus | null>(null);
   const [hidden, setHidden] = createSignal(false);
@@ -30,11 +37,13 @@ export function Updater(props: {
 
   /** Долгий запрос за запросом: каждый ответ — свежие новости о версии; обрыв — сервер перезапускается. */
   const listen = async () => {
-    let known = '';
+    let known: string | null = null;
     while (alive && !busy()) {
       try {
-        const u = await vault.updateWait(known);
+        // Первый раз — обычный запрос (узнать версию сразу), дальше — долгие: ответ придёт, когда будут новости.
+        const u: UpdateStatus = known === null ? await vault.updateStatus() : await vault.updateWait(known);
         known = u.latest?.tag ?? '';
+        props.onVersion?.(u.current);
         setStatus(u.available ? u : null);
         props.onStatus(u.available ? u : null);
       } catch {
@@ -78,8 +87,30 @@ export function Updater(props: {
     }
   };
 
+  /** Проверить сейчас (щелчок по номеру версии): спросить GitHub, не дожидаясь фоновой проверки. */
+  const checkNow = async () => {
+    if (busy()) return;
+    props.onNotice('Проверяю обновления…');
+    try {
+      const u = await vault.updateStatus(true);
+      props.onVersion?.(u.current);
+      setStatus(u.available ? u : null);
+      props.onStatus(u.available ? u : null);
+      setHidden(false);
+      if (u.available) return;
+      if (!u.latest) props.onNotice(`Версия ${u.current}. Релизов на GitHub не нашлось или GitHub не ответил`);
+      else if (u.git) props.onNotice(`Версия ${u.current} — последняя. Это копия для разработки: она обновляется через git pull`);
+      else props.onNotice(`Версия ${u.current} — последняя`);
+    } catch (err) {
+      props.onNotice(`Не удалось проверить: ${(err as Error).message}`);
+    }
+  };
+
   onMount(() => {
     void listen();
+    const onCheck = () => void checkNow();
+    window.addEventListener(CHECK_UPDATE_EVENT, onCheck);
+    onCleanup(() => window.removeEventListener(CHECK_UPDATE_EVENT, onCheck));
     const onInput = () => { lastInput = Date.now(); };
     // Минута без действий — обновиться самому (если можно, включено и не отложено).
     const idle = setInterval(() => {

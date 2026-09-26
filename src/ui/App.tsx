@@ -23,7 +23,7 @@ import { LayersPanel } from './LayersPanel.tsx';
 import { HelpDialog } from './HelpDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
 import { SetupDialog } from './SetupDialog.tsx';
-import { Updater } from './Updater.tsx';
+import { CHECK_UPDATE_EVENT, Updater } from './Updater.tsx';
 import type { Settings, SetupInfo, UpdateStatus } from '../io/vault.ts';
 import { EmbedLayer } from './EmbedLayer.ts';
 import { CommentsLayer } from './CommentsLayer.ts';
@@ -156,6 +156,8 @@ export function App() {
   const [wizardAgain, setWizardAgain] = createSignal<Settings | null>(null);
   /** Вышел новый релиз — показываем плашку (её можно закрыть). */
   const [update, setUpdate] = createSignal<UpdateStatus | null>(null);
+  /** Номер версии: вшитый при сборке, пока сервер не сообщил свой. */
+  const [version, setVersion] = createSignal(__APP_VERSION__);
   /** Панель досок свёрнута — выезжает поверх доски, когда мышь у левого края. Запоминается. */
   const [collapsed, setCollapsed] = createSignal(readFlag('vaultboard:sidebar-collapsed'));
   const [peek, setPeek] = createSignal(false);
@@ -832,7 +834,19 @@ export function App() {
             <span class="logo">vb</span>
             <span class="side-title">
               <b>
-                vaultboard <span class="side-version" title="Версия приложения">v{__APP_VERSION__}</span>
+                vaultboard{' '}
+                <span
+                  class="side-version"
+                  role="button"
+                  title="Проверить обновления сейчас"
+                  onClick={(e) => {
+                    // Не открывать мастер настройки (щелчок по шапке) — это отдельная кнопка.
+                    e.stopPropagation();
+                    window.dispatchEvent(new Event(CHECK_UPDATE_EVENT));
+                  }}
+                >
+                  v{version()} ⟳
+                </span>
                 <Show when={update()}>
                   {(u) => <span class="side-update" title={`Вышла ${u().latest!.tag} — поставится при следующем запуске`}>↑ {u().latest!.tag}</span>}
                 </Show>
@@ -996,6 +1010,8 @@ export function App() {
         </Show>
         <Updater
           onStatus={setUpdate}
+          onNotice={flash}
+          onVersion={setVersion}
           beforeRestart={async () => {
             if (opened?.session?.hasUnsaved) await opened.session.save();
           }}
