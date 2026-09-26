@@ -416,6 +416,65 @@ export function App() {
     ];
   }
 
+  // ---------- слежение за файлами снаружи ----------
+
+  let filesRefreshTimer = 0;
+  /** Список файлов (для [[ссылок]] и поиска заметок) — не чаще раза в 2 секунды, даже если меняется много. */
+  function refreshFilesSoon() {
+    if (filesRefreshTimer) return;
+    filesRefreshTimer = window.setTimeout(() => {
+      filesRefreshTimer = 0;
+      void files.refresh().catch(() => undefined);
+    }, 2000);
+  }
+
+  /** Открытую доску поменяли снаружи: нет своих несохранённых правок — перечитать; есть — спросить, чью версию оставить. */
+  async function boardChangedOutside(path: string) {
+    const s = opened?.session;
+    if (!s || s.path !== path) return;
+    const mtime = await vault.mtimeOf(path).catch(() => null);
+    if (mtime === null || mtime === s.diskMtime) return;
+    if (s.hasUnsaved) {
+      s.markConflict();
+      return;
+    }
+    await openBoard(path);
+    flash('Доску изменили снаружи — открыта новая версия');
+  }
+
+  /** Применить то, что поменялось в папке снаружи. */
+  async function applyOutsideChanges(paths: string[], reset: boolean) {
+    if (reset) {
+      await docs.revalidate();
+      refreshFilesSoon();
+      void refreshBoards().catch(() => undefined);
+      const cur = opened?.session?.path;
+      if (cur) await boardChangedOutside(cur);
+      return;
+    }
+    // Заметки, которые показаны на досках или открыты в панели, — перечитать (панель обновится, если в ней нет правок).
+    for (const p of paths) if (/\.md$/i.test(p) && docs.get(p)) void docs.load(p);
+    refreshFilesSoon();
+    if (paths.some((p) => /\.(board|canvas)$/i.test(p))) void refreshBoards().catch(() => undefined);
+    const cur = opened?.session?.path;
+    if (cur && paths.includes(cur)) await boardChangedOutside(cur);
+  }
+
+  /** Долгий запрос за изменениями в папке: ответ приходит, как только что-то поменялось снаружи. */
+  async function watchOutsideChanges() {
+    let since = -1;
+    for (;;) {
+      try {
+        const r = await vault.changesWait(since);
+        if (since >= 0 && (r.paths.length || r.reset)) await applyOutsideChanges(r.paths, !!r.reset);
+        since = r.seq;
+      } catch {
+        // Сервер перезапускается или папка ещё не выбрана — подождать и спросить снова.
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      }
+    }
+  }
+
   /** Открыть мастер настройки ещё раз — щелчком по логотипу в панели досок. */
   async function openWizard() {
     try {
@@ -825,6 +884,7 @@ export function App() {
       v.destroy();
     });
 
+    void watchOutsideChanges();
     const params = new URLSearchParams(location.search);
     if (!setup()) await refreshBoards().catch((err: Error) => setError(err.message));
     if (params.get('bench')) await openBench(Number(params.get('bench')), params.get('auto') === '1');

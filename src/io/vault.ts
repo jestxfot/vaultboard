@@ -154,6 +154,13 @@ export const vault = {
     await request('/api/settings', { method: 'PUT', body: JSON.stringify(settings) });
   },
 
+  /**
+   * Долгий запрос: что поменялось в папке с досками снаружи (Obsidian, git, проводник) после изменения `since`.
+   * `since` = −1 — только узнать текущий номер. `reset` — изменений было слишком много или сервер перезапустился:
+   * перечитать всё.
+   */
+  changesWait: (since: number) => request<{ seq: number; paths: string[]; reset?: boolean }>(`/api/changes/wait?since=${since}`),
+
   /** Первая настройка: выбрана ли папка с досками и что предложить. */
   setup: () => request<SetupInfo>('/api/setup'),
 

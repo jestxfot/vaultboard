@@ -3,7 +3,7 @@
 // В настольной версии (Tauri) этот слой заменится прямым доступом к диску.
 import type { Plugin } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { appendFileSync, createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import { appendFileSync, createReadStream, createWriteStream, type FSWatcher, promises as fs, watch as fsWatch } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -194,6 +194,79 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     }
     if (!started) spawn(process.execPath, args, { cwd: projectDir, detached: true, windowsHide: true, stdio: 'ignore' }).unref();
     setTimeout(() => process.exit(0), 400);
+  }
+
+  // ---------- слежение за файлами папки с досками ----------
+
+  /**
+   * Что поменялось в папке снаружи (Obsidian, git, проводник): номер изменения и путь от корня базы.
+   * Свои записи (доска, заметка, фото) сервер помечает заранее и не пересылает — иначе каждая правка
+   * возвращалась бы эхом. Вкладки узнают о переменах долгим запросом /changes/wait.
+   */
+  let watcher: FSWatcher | null = null;
+  let watchedRoot = '';
+  let changeSeq = 0;
+  const changeLog: { seq: number; path: string }[] = [];
+  const pendingChanges = new Set<string>();
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Свои записи: путь → когда. Событие по такому пути в ближайшие секунды — эхо, его пропускаем. */
+  const ownWrites = new Map<string, number>();
+  const changeWaiters = new Set<() => void>();
+  /** Не следим: служебные папки, история отмены, временные файлы записи. */
+  const IGNORE = /(^|\/)(\.git|\.obsidian|\.trash|\.vaultboard|node_modules)(\/|$)|\.история\.jsonl$|\.tmp-\d+-\d+$|\.vb-update$|(^|\/)\.upload-\d+-\d+$/;
+
+  const rel = (abs: string) => path.relative(watchedRoot, abs).split(path.sep).join('/');
+
+  /** Пометить файл как свою запись — до записи, чтобы событие о ней не ушло во вкладки. */
+  function markOwn(abs: string): void {
+    if (!watchedRoot) return;
+    ownWrites.set(rel(abs), Date.now());
+    if (ownWrites.size > 500) for (const [k, t] of ownWrites) if (Date.now() - t > 10_000) ownWrites.delete(k);
+  }
+
+  function flushChanges(): void {
+    flushTimer = null;
+    for (const p of pendingChanges) {
+      changeLog.push({ seq: ++changeSeq, path: p });
+    }
+    pendingChanges.clear();
+    if (changeLog.length > 1000) changeLog.splice(0, changeLog.length - 1000);
+    for (const wake of [...changeWaiters]) wake();
+  }
+
+  /** Следить за папкой с досками (перезапускается, если папку сменили в настройках). */
+  function ensureWatcher(root: string): void {
+    if (root === watchedRoot) return;
+    watcher?.close();
+    watcher = null;
+    watchedRoot = root;
+    try {
+      watcher = fsWatch(root, { recursive: true }, (_event, name) => {
+        if (!name) return;
+        const p = String(name).split(path.sep).join('/');
+        if (IGNORE.test(p)) return;
+        const own = ownWrites.get(p);
+        if (own && Date.now() - own < 3000) return;
+        pendingChanges.add(p);
+        // Редактор пишет файл в несколько приёмов — собираем события за 150 мс в одно.
+        if (!flushTimer) flushTimer = setTimeout(flushChanges, 150);
+      });
+      watcher.on('error', () => {
+        // Папку удалили или она недоступна — перестаём следить; вкладки обновятся при возврате фокуса.
+        watcher?.close();
+        watcher = null;
+      });
+    } catch {
+      watcher = null;
+    }
+  }
+
+  /** Что поменялось после номера `since`. Номер из будущего или слишком старый — вкладке надо перечитать всё. */
+  function changesSince(since: number): { seq: number; paths: string[]; reset?: boolean } {
+    if (since < 0) return { seq: changeSeq, paths: [] };
+    const oldest = changeLog[0]?.seq ?? changeSeq + 1;
+    if (since > changeSeq || (since < oldest - 1 && changeLog.length)) return { seq: changeSeq, paths: [], reset: true };
+    return { seq: changeSeq, paths: [...new Set(changeLog.filter((c) => c.seq > since).map((c) => c.path))] };
   }
 
   // ---------- релизы: одна фоновая проверка на весь сервер ----------
@@ -387,6 +460,29 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
 
     const absRoot = await currentRoot();
     if (!absRoot) return sendJson(res, 409, { error: 'Сначала выбери папку с досками', setup: true });
+    ensureWatcher(absRoot);
+
+    if (req.method === 'GET' && url.pathname === '/changes/wait') {
+      // Долгий запрос: ответ — как только в папке что-то поменялось снаружи (или через 50 секунд, пусто).
+      const since = Number(url.searchParams.get('since') ?? -1);
+      const now = changesSince(since);
+      if (now.paths.length || now.reset || since < 0) return sendJson(res, 200, now);
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          changeWaiters.delete(finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, 50_000);
+        changeWaiters.add(finish);
+        req.on('close', finish);
+      });
+      if (res.writableEnded || res.destroyed) return;
+      return sendJson(res, 200, changesSince(since));
+    }
 
     if (req.method === 'GET' && url.pathname === '/boards') {
       const boards = [];
@@ -431,6 +527,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       parseBoard(body); // не записываем испорченную доску
       await fs.mkdir(path.dirname(abs), { recursive: true });
       // Атомарно: сначала во временный файл, потом переименование. Доска не останется полузаписанной.
+      markOwn(abs);
       const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`;
       await fs.writeFile(tmp, body, 'utf8');
       await fs.rename(tmp, abs);
@@ -458,6 +555,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       }
       const body = await readBody(req);
       await fs.mkdir(path.dirname(abs), { recursive: true });
+      markOwn(abs);
       const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`;
       await fs.writeFile(tmp, body, 'utf8');
       await fs.rename(tmp, abs);
@@ -479,6 +577,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       const stem = name.slice(0, name.length - ext.length);
       let target = path.join(trashDir, name);
       for (let i = 2; await fs.stat(target).then(() => true, () => false); i++) target = path.join(trashDir, `${stem} ${i}${ext}`);
+      markOwn(abs);
       await fs.rename(abs, target);
       return sendJson(res, 200, { trashed: `.trash/${path.basename(target)}` });
     }
@@ -540,6 +639,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       let final = name;
       for (let i = 2; await fs.stat(path.join(absDir, final)).then(() => true, () => false); i++) final = `${stem} (${i})${ext}`;
       const abs = path.join(absDir, final);
+      markOwn(abs);
       await fs.rename(tmp, abs);
       const st = await fs.stat(abs);
       hashCache.set(abs, { size: st.size, mtime: st.mtimeMs, hash: digest });
@@ -574,6 +674,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
           chunks.push(c as Buffer);
         }
         await fs.mkdir(PREVIEW_DIR, { recursive: true });
+        markOwn(file);
         const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
         await fs.writeFile(tmp, Buffer.concat(chunks));
         await fs.rename(tmp, file);
@@ -613,7 +714,8 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
         const body = await readBody(req);
         JSON.parse(body);
         await fs.mkdir(path.dirname(abs), { recursive: true });
-        const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`;
+        markOwn(abs);
+      const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`;
         await fs.writeFile(tmp, body, 'utf8');
         await fs.rename(tmp, abs);
         return sendJson(res, 200, { ok: true });

@@ -42,6 +42,16 @@ export class BoardSession {
     return this.store.doc.meta.id as string;
   }
 
+  /** Время изменения файла доски, каким мы его записали или прочитали. Другое на диске — доску меняли снаружи. */
+  get diskMtime(): number | 'new' {
+    return this.mtime;
+  }
+
+  /** Доску поменяли снаружи, а у нас есть несохранённые правки — спросить пользователя, чью версию оставить. */
+  markConflict(): void {
+    this.onState?.({ kind: 'conflict', message: 'Файл доски изменили снаружи' });
+  }
+
   get hasUnsaved(): boolean {
     return this.dirty || this.saving || this.logLines.length > 0;
   }
