@@ -38,9 +38,23 @@ export interface ImageItem extends Box { kind: 'image'; file: string; pw?: numbe
 export interface FileItem extends Box { kind: 'file'; file: string }
 export interface LinkItem extends Box { kind: 'link'; url: string }
 
+/** Штрих рисунка. `pts` — точки в координатах рисунка, сжатые: см. format/strokes.ts. */
+export interface Stroke {
+  tool: 'pen' | 'marker';
+  color: string;
+  size: number;
+  pts: number[];
+}
+
+/**
+ * Рисунок от руки: несколько штрихов, нарисованных подряд и рядом, — один объект.
+ * `vw`/`vh` — размер, в котором записаны точки; если рисунок растянули, штрихи масштабируются.
+ */
+export interface DrawingItem extends Box { kind: 'drawing'; vw: number; vh: number; strokes: Stroke[] }
+
 export type BoxItem =
   | FrameItem | StickyItem | CardItem | TextItem | ShapeItem
-  | DocItem | ImageItem | FileItem | LinkItem;
+  | DocItem | ImageItem | FileItem | LinkItem | DrawingItem;
 
 /** Конец линии: прицеплен к объекту или висит в точке доски. */
 export type Endpoint = { item: string; side?: Side } | { x: number; y: number };
@@ -76,7 +90,7 @@ export interface CommentThread {
 }
 
 export interface BoardDoc {
-  format: 'vaultboard/1';
+  format: 'vaultboard/2';
   meta: Record<string, unknown>;
   items: Item[];
   comments: CommentThread[];

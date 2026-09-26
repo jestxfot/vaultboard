@@ -3,7 +3,7 @@ import { createSignal, For, type JSX, Show } from 'solid-js';
 import type { Editor, EditorUi } from '../editor/Editor.ts';
 import type { PathKind, ShapeKind } from '../model/types.ts';
 import { STICKY_PALETTE } from '../format/colors.ts';
-import { IconFrame, IconPhoto, IconRedo, IconSelect, IconShapes, IconSticky, IconText, IconUndo } from './icons.tsx';
+import { IconDoc, IconFrame, IconPhoto, IconRedo, IconSelect, IconShapes, IconSticky, IconText, IconUndo } from './icons.tsx';
 
 type Menu = 'sticky' | 'shapes' | null;
 
@@ -38,7 +38,7 @@ function ToolButton(props: { title: string; active?: boolean; disabled?: boolean
   );
 }
 
-export function Toolbar(props: { editor: Editor; ui: EditorUi; onPhoto: () => void }) {
+export function Toolbar(props: { editor: Editor; ui: EditorUi; onPhoto: () => void; onDoc: () => void }) {
   const [menu, setMenu] = createSignal<Menu>(null);
   const toggle = (m: Menu) => setMenu((cur) => (cur === m ? null : m));
   const pick = (fn: () => void) => {
@@ -60,6 +60,9 @@ export function Toolbar(props: { editor: Editor; ui: EditorUi; onPhoto: () => vo
         </ToolButton>
         <ToolButton title="Фигуры и линии" active={props.ui.tool === 'shape' || props.ui.tool === 'line' || menu() === 'shapes'} onClick={() => toggle('shapes')}>
           <IconShapes />
+        </ToolButton>
+        <ToolButton title="Документ — заметка .md в папке доски (D — сразу под курсором)" onClick={() => pick(props.onDoc)}>
+          <IconDoc />
         </ToolButton>
         <ToolButton title="Рамка (F)" active={props.ui.tool === 'frame'} onClick={() => pick(() => props.editor.setTool('frame'))}>
           <IconFrame />

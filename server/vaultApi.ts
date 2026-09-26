@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts';
 import { BoardFormatError, parseBoard } from '../src/format/board.ts';
+import { boardFolderOf, historyPathOf } from '../src/model/paths.ts';
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -148,24 +149,41 @@ export function vaultApi(root: string): Plugin {
       return sendJson(res, 200, { mtime: done.mtimeMs });
     }
 
-    if (req.method === 'POST' && url.pathname === '/history') {
-      // Журнал истории только дописывается, и только в свою папку.
-      const id = url.searchParams.get('board') ?? '';
-      if (!/^[a-z0-9-]{8,64}$/i.test(id)) return sendJson(res, 400, { error: 'Неверный id доски' });
-      const abs = toAbsolute(absRoot, `.vaultboard/history/${id}.jsonl`);
-      await fs.mkdir(path.dirname(abs), { recursive: true });
-      await fs.appendFile(abs, await readBody(req), 'utf8');
-      return sendJson(res, 200, { ok: true });
+    if (req.method === 'POST' && url.pathname === '/trash') {
+      // Удаление файла с доски — не насовсем, а в корзину базы `.trash`, как делает Obsidian. Оттуда можно вернуть.
+      const rel = url.searchParams.get('path') ?? '';
+      if (/\.board$/i.test(rel) || rel.startsWith('.')) return sendJson(res, 403, { error: 'Этот файл так удалять нельзя' });
+      const abs = toAbsolute(absRoot, rel);
+      const st = await fs.stat(abs).catch(() => null);
+      if (!st?.isFile()) return sendJson(res, 404, { error: `Нет файла: ${rel}` });
+      const trashDir = path.join(absRoot, '.trash');
+      await fs.mkdir(trashDir, { recursive: true });
+      const name = path.basename(abs);
+      const ext = path.extname(name);
+      const stem = name.slice(0, name.length - ext.length);
+      let target = path.join(trashDir, name);
+      for (let i = 2; await fs.stat(target).then(() => true, () => false); i++) target = path.join(trashDir, `${stem} ${i}${ext}`);
+      await fs.rename(abs, target);
+      return sendJson(res, 200, { trashed: `.trash/${path.basename(target)}` });
     }
 
-    if (req.method === 'GET' && url.pathname === '/history') {
-      const id = url.searchParams.get('board') ?? '';
-      if (!/^[a-z0-9-]{8,64}$/i.test(id)) return sendJson(res, 400, { error: 'Неверный id доски' });
-      const text = await fs.readFile(toAbsolute(absRoot, `.vaultboard/history/${id}.jsonl`), 'utf8').catch(() => '');
-      res.statusCode = 200;
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.end(text);
-      return;
+    if (url.pathname === '/history') {
+      // История отмены лежит в папке доски (.история.jsonl) и переезжает вместе с ней. Только дописывается.
+      const board = url.searchParams.get('board') ?? '';
+      if (!/\.board$/i.test(board)) return sendJson(res, 400, { error: 'Неверный путь доски' });
+      const abs = toAbsolute(absRoot, historyPathOf(board));
+      if (req.method === 'POST') {
+        await fs.mkdir(path.dirname(abs), { recursive: true });
+        await fs.appendFile(abs, await readBody(req), 'utf8');
+        return sendJson(res, 200, { ok: true });
+      }
+      if (req.method === 'GET') {
+        const text = await fs.readFile(abs, 'utf8').catch(() => '');
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end(text);
+        return;
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/upload') {
@@ -173,8 +191,8 @@ export function vaultApi(root: string): Plugin {
       const board = url.searchParams.get('board') ?? '';
       if (!/\.board$/i.test(board)) return sendJson(res, 400, { error: 'Фото сохраняются в папку доски — сначала открой доску' });
       const name = safeName(url.searchParams.get('name') ?? '');
-      const dir = path.posix.dirname(board);
-      const relDir = `${dir === '.' ? '' : `${dir}/`}${path.posix.basename(board).replace(/\.board$/i, '')}/фото`;
+      const folder = boardFolderOf(board);
+      const relDir = `${folder ? `${folder}/` : ''}фото`;
       const absDir = toAbsolute(absRoot, relDir);
       await fs.mkdir(absDir, { recursive: true });
 

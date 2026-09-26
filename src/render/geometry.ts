@@ -85,6 +85,20 @@ export function lineTip(g: LineGeom, atEnd: boolean): { tip: Point; dir: [number
   return { tip, dir: unit(tip.x - from.x, tip.y - from.y) };
 }
 
+/** Линия как ломаная: кривую Безье приближаем отрезками — для пунктира и попадания мышью этого хватает. */
+export function samplePath(g: LineGeom, steps = 24): Point[] {
+  if (g.kind === 'poly') return g.points;
+  const pts: Point[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps, u = 1 - t;
+    pts.push({
+      x: u * u * u * g.a.x + 3 * u * u * t * g.c1.x + 3 * u * t * t * g.c2.x + t * t * t * g.b.x,
+      y: u * u * u * g.a.y + 3 * u * u * t * g.c1.y + 3 * u * t * t * g.c2.y + t * t * t * g.b.y,
+    });
+  }
+  return pts;
+}
+
 /** Середина линии по длине пути — сюда ставится подпись. */
 export function lineMidpoint(g: LineGeom): Point {
   if (g.kind === 'bezier') {

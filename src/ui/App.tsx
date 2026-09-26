@@ -18,6 +18,7 @@ import { DocPanel, type DocMode } from './DocPanel.tsx';
 import { QuickOpen } from './QuickOpen.tsx';
 import { DocCache, FileIndex } from '../io/files.ts';
 import { createMarkdown } from '../format/markdown.ts';
+import { BOARD_FILE, boardFolderOf, BoardPaths, boardTitleOf } from '../model/paths.ts';
 
 interface Opened {
   store: BoardStore;
@@ -145,8 +146,11 @@ export function App() {
   /** Папка файлов доски: `Доски/Таймлайн.board` → `Доски/Таймлайн`. */
   function boardFolder(): string | null {
     const board = opened?.session?.path;
-    return board ? board.replace(/\.board$/i, '') : null;
+    return board ? boardFolderOf(board) : null;
   }
+
+  /** Путь файла карточки от корня базы. */
+  const vaultPath = (stored: string) => view()!.paths.toVault(stored);
 
   /** Свободное имя файла в папке: «Имя.md», «Имя 2.md», … */
   function freePath(dir: string, name: string): string {
@@ -192,6 +196,46 @@ export function App() {
     flash(`Создана заметка ${path}`);
   }
 
+  /**
+   * [[Ссылка]] в стикере или тексте на доске. Заметка есть — открыть её (и показать карточку, если она на доске).
+   * Нет — создать документ в папке доски, карточку положить справа и соединить стрелкой.
+   */
+  async function openLinkFromBoard(fromId: string, target: string) {
+    const dir = boardFolder();
+    if (!dir || !opened) return flash('Документы сохраняются в папку доски — сначала создай или открой доску');
+    const existing = files.resolve(target, `${dir}/`);
+    if (existing) {
+      setPanel({ path: existing, mode: 'read' });
+      const card = opened.store.items.find((i) => i.kind === 'doc' && vaultPath(i.file) === existing);
+      if (card) opened.editor.focusItem(card.id);
+      else opened.editor.placeDocFrom(fromId, existing);
+      return;
+    }
+    const name = nameFromText(target.split('|')[0].split('#')[0]);
+    const path = `${dir}/${name}.md`;
+    if (!(await writeNewDoc(path, `# ${name}\n\n`))) return;
+    opened.editor.placeDocFrom(fromId, path);
+    setPanel({ path, mode: 'edit' });
+  }
+
+  /** «Удалить файл» у карточки: файл уходит в корзину базы, все его карточки убираются с доски. */
+  async function trashSelectedFile() {
+    const sel = opened?.editor.selectedFile();
+    if (!sel || !opened) return;
+    const what = sel.kind === 'image' ? 'фото' : sel.kind === 'doc' ? 'заметку' : 'файл';
+    const ok = window.confirm(`Удалить ${what} «${sel.file}» с диска?\n\nФайл уйдёт в корзину базы (.trash), как в Obsidian, — оттуда его можно вернуть.`);
+    if (!ok) return;
+    try {
+      const trashed = await vault.trash(sel.file);
+      opened.editor.removeItemsWithFile(sel.file);
+      if (panel()?.path === sel.file) setPanel(null);
+      await files.refresh();
+      flash(`Файл перемещён в ${trashed}`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
   /** Переход по [[ссылке]] из панели. Нет такой заметки — создаём рядом с текущей, как Obsidian. */
   async function navigate(target: string, resolved: string | null) {
     let path = resolved ?? files.resolve(target, panel()?.path ?? '');
@@ -205,7 +249,7 @@ export function App() {
     }
     if (!path.toLowerCase().endsWith('.md')) return;
     setPanel({ path, mode: 'read' });
-    const card = opened?.store.items.find((i) => i.kind === 'doc' && i.file === path);
+    const card = opened?.store.items.find((i) => i.kind === 'doc' && vaultPath(i.file) === path);
     if (card) opened!.editor.focusItem(card.id);
   }
 
@@ -215,7 +259,8 @@ export function App() {
     // Соседние фото — в порядке чтения доски: сверху вниз, слева направо.
     const items = store.items
       .filter((i): i is ImageItem => i.kind === 'image')
-      .sort((a, b) => (Math.abs(a.y - b.y) > 50 ? a.y - b.y : a.x - b.x));
+      .sort((a, b) => (Math.abs(a.y - b.y) > 50 ? a.y - b.y : a.x - b.x))
+      .map((i) => ({ ...i, file: vaultPath(i.file) }));
     setViewer({ items, index: Math.max(0, items.findIndex((i) => i.id === id)) });
   }
 
@@ -243,6 +288,7 @@ export function App() {
     const v = view()!;
     const store = new BoardStore(doc);
     const cam = path ? loadCamera(path) : null;
+    v.paths = new BoardPaths(path ? boardFolderOf(path) : '');
     v.load(doc, !cam);
     if (cam) v.setCamera(cam);
 
@@ -293,8 +339,8 @@ export function App() {
     setBench(null);
     try {
       if (path.toLowerCase().endsWith('.canvas')) {
-        // Доска Obsidian открывается как наша копия рядом с ней: оригинал .canvas не трогаем.
-        const target = path.replace(/\.canvas$/i, '.board');
+        // Доска Obsidian открывается как наша копия — папкой рядом с ней: оригинал .canvas не трогаем.
+        const target = `${path.replace(/\.canvas$/i, '')}/${BOARD_FILE}`;
         if (boards().some((b) => b.path === target)) {
           flash(`Открыта сохранённая копия: ${target}`);
           return openBoard(target);
@@ -315,9 +361,10 @@ export function App() {
   }
 
   async function createBoard(name: string) {
-    let path = name.trim().replace(/\\/g, '/');
-    if (!path) return;
-    if (!/\.board$/i.test(path)) path += '.board';
+    // Новая доска — папка с файлом доска.board: всё её содержимое будет лежать внутри.
+    const folder = name.trim().replace(/\\/g, '/').replace(/\/+$/, '').replace(/\.board$/i, '');
+    if (!folder) return;
+    const path = `${folder}/${BOARD_FILE}`;
     const doc = emptyBoard();
     doc.meta.id = crypto.randomUUID();
     doc.meta.created = new Date().toISOString().slice(0, 10);
@@ -420,7 +467,7 @@ export function App() {
               onKeyDown={(e) => e.key === 'Escape' && setNewName(null)}
               ref={(el) => setTimeout(() => el.select())}
             />
-            <div class="new-board-hint">Путь от корня базы. Enter — создать, Esc — отмена.</div>
+            <div class="new-board-hint">Папка доски от корня базы — в ней будет всё: доска, фото, документы, история. Enter — создать, Esc — отмена.</div>
             <input type="submit" hidden />
           </form>
         </Show>
@@ -428,7 +475,7 @@ export function App() {
           {(b) => (
             <button class="board" classList={{ active: current() === b.path }} onClick={() => openBoard(b.path)} title={b.path}>
               <span class="kind">{b.kind === 'canvas' ? 'Obsidian' : 'доска'}</span>
-              {b.path}
+              {b.kind === 'board' ? boardTitleOf(b.path) : b.path}
             </button>
           )}
         </For>
@@ -449,8 +496,19 @@ export function App() {
       <main class="stage">
         <div class="board-host" ref={host} />
         <Show when={editor() && ui()}>
-          <Toolbar editor={editor()!} ui={ui()!} onPhoto={() => filePicker.click()} />
-          <ContextBar editor={editor()!} ui={ui()!} onConvertToDoc={() => void convertToDoc()} />
+          <Toolbar
+            editor={editor()!}
+            ui={ui()!}
+            onPhoto={() => filePicker.click()}
+            onDoc={() => opened && void createDoc(opened.editor.viewCenter())}
+          />
+          <ContextBar
+            editor={editor()!}
+            ui={ui()!}
+            onConvertToDoc={() => void convertToDoc()}
+            onOpenLink={(fromId, target) => void openLinkFromBoard(fromId, target)}
+            onTrashFile={() => void trashSelectedFile()}
+          />
         </Show>
         <div class="topbar">
           <span class="title">{current() || 'Выбери доску слева'}</span>

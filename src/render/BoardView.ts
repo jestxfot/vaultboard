@@ -14,6 +14,7 @@ import RBush from 'rbush';
 import type { BoardDoc, BoxItem, DocItem, ImageItem, Item, LineItem } from '../model/types.ts';
 import type { DocCache } from '../io/files.ts';
 import type { Markdown } from '../format/markdown.ts';
+import { BoardPaths } from '../model/paths.ts';
 import { isLine } from '../model/types.ts';
 import type { Op } from '../model/store.ts';
 import type { PerfMonitor } from '../perf/monitor.ts';
@@ -141,6 +142,8 @@ export class BoardView {
 
   /** Текстуры фото. */
   images!: ImageCache;
+  /** Как пути в доске переводятся в пути от корня базы. Задаётся перед load(). */
+  paths = new BoardPaths('');
   private docs: DocCache | null = null;
   private markdown: Markdown | null = null;
 
@@ -385,8 +388,9 @@ export class BoardView {
     const v = new ItemView(item);
     this.views.set(item.id, v);
     if (item.kind === 'image' || item.kind === 'doc') {
-      let set = this.fileViews.get(item.file);
-      if (!set) this.fileViews.set(item.file, (set = new Set()));
+      const file = this.paths.toVault(item.file);
+      let set = this.fileViews.get(file);
+      if (!set) this.fileViews.set(file, (set = new Set()));
       set.add(v);
     }
     return v;
@@ -412,7 +416,7 @@ export class BoardView {
     this.labelQueue.delete(v);
     if (v.gfx) this.nearCount--;
     if (v.label) this.labelCount--;
-    if (v.item.kind === 'image' || v.item.kind === 'doc') this.fileViews.get(v.item.file)?.delete(v);
+    if (v.item.kind === 'image' || v.item.kind === 'doc') this.fileViews.get(this.paths.toVault(v.item.file))?.delete(v);
     // Текстуры фото общие и живут в кэше — спрайт уничтожается без них.
     v.container.destroy({ children: true });
   }
@@ -666,9 +670,10 @@ export class BoardView {
   private updatePhoto(v: ItemView, item: ImageItem): boolean {
     const px = Math.max(item.w, item.h) * this.cam.zoom * window.devicePixelRatio;
     const want: Level = px <= 160 ? 0 : px <= 640 ? 1 : 2;
-    this.images.request(item.file, want === 2 ? 1 : want);
-    if (want === 2 && !this.moving) this.images.request(item.file, 2);
-    const best = this.images.best(item.file, want);
+    const file = this.paths.toVault(item.file);
+    this.images.request(file, want === 2 ? 1 : want);
+    if (want === 2 && !this.moving) this.images.request(file, 2);
+    const best = this.images.best(file, want);
     if (!best) {
       if (v.photo) v.photo.visible = false;
       return false;
@@ -751,14 +756,15 @@ export class BoardView {
   private createDocBody(v: ItemView): void {
     const item = v.item as DocItem;
     if (v.body || !this.docs || !this.markdown || !v.gfx?.visible || !this.visible.has(v)) return;
-    const doc = this.docs.get(item.file);
+    const file = this.paths.toVault(item.file);
+    const doc = this.docs.get(file);
     if (!doc) {
-      this.docs.request(item.file);
+      this.docs.request(file);
       return;
     }
     const pad = 14, top = 42;
     const w = Math.max(20, item.w - pad * 2), h = Math.max(10, item.h - top - pad);
-    const html = this.markdown.render(doc.text, { from: item.file, card: true });
+    const html = this.markdown.render(doc.text, { from: file, card: true });
     const res = this.labelResolution();
     const body = new HTMLText({
       text: `<style>${CARD_CSS}</style><div class="vbmd" style="width:${w}px;height:${h}px">${html}</div>`,
@@ -813,7 +819,7 @@ export class BoardView {
     const photosInUse = new Set<string>();
     for (const v of this.visible) {
       if (v.item.kind !== 'image') continue;
-      photosInUse.add(v.item.file);
+      photosInUse.add(this.paths.toVault(v.item.file));
       this.updateDetail(v);
     }
     this.images.evict(photosInUse);

@@ -1,8 +1,10 @@
 // Как выглядит каждый вид объекта. Рисует в Pixi Graphics в координатах объекта (0,0 — его левый верхний угол).
 import { CanvasTextMetrics, Graphics, Text, TextStyle } from 'pixi.js';
-import type { BoxItem, EndCap, LineItem, ShapeKind } from '../model/types.ts';
+import getStroke from 'perfect-freehand';
+import type { BoxItem, DrawingItem, EndCap, LineItem, ShapeKind, Stroke } from '../model/types.ts';
+import { decodePoints, type StrokePoint } from '../format/strokes.ts';
 import { DEFAULT_STICKY, hexToNum, isDark, tint } from '../format/colors.ts';
-import { type LineGeom, lineTip } from './geometry.ts';
+import { type LineGeom, lineTip, samplePath } from './geometry.ts';
 
 export const FONT = '"Segoe UI", "Noto Sans", system-ui, sans-serif';
 const INK = 0x1f1f1f;
@@ -56,6 +58,9 @@ export function drawBox(g: Graphics, item: BoxItem): void {
     case 'image':
       g.rect(0, 0, w, h).fill(0xe9e9e6).stroke({ width: 1, color: BORDER });
       break;
+    case 'drawing':
+      drawStrokes(g, item);
+      break;
     case 'card':
     case 'link':
       g.roundRect(0, 0, w, h, 8)
@@ -76,6 +81,7 @@ export function farColor(item: BoxItem): number {
     case 'shape': return item.color ? hexToNum(item.color) : 0xe4e4e0;
     case 'text': return 0xd6d6d2;
     case 'image': return 0xd9d9d5;
+    case 'drawing': return item.strokes[0] ? tint(item.strokes[0].color, 0.6) : 0xd6d6d2;
     default: return item.color ? tint(item.color, 0.55) : 0xe4e4e0;
   }
 }
@@ -92,17 +98,49 @@ function drawCap(g: Graphics, geom: LineGeom, atEnd: boolean, cap: EndCap, width
   else g.poly([tip.x, tip.y, tip.x - dx * size * 0.5 + px, tip.y - dy * size * 0.5 + py, bx, by, tip.x - dx * size * 0.5 - px, tip.y - dy * size * 0.5 - py]).fill(color);
 }
 
+/** Пунктир или точки: путь режется на отрезки по длине. В WebGL нет готового пунктира, поэтому так. */
+function dashPath(g: Graphics, geom: LineGeom, dash: number, gap: number): void {
+  const pts = samplePath(geom, 64);
+  let draw = true, left = dash;
+  let x = pts[0].x, y = pts[0].y;
+  g.moveTo(x, y);
+  for (let i = 1; i < pts.length; i++) {
+    const tx = pts[i].x, ty = pts[i].y;
+    let seg = Math.hypot(tx - x, ty - y);
+    while (seg > 0) {
+      const step = Math.min(seg, left);
+      const k = step / seg;
+      x += (tx - x) * k;
+      y += (ty - y) * k;
+      if (draw) g.lineTo(x, y);
+      else g.moveTo(x, y);
+      seg -= step;
+      left -= step;
+      if (left <= 1e-6) {
+        draw = !draw;
+        left = draw ? dash : gap;
+      }
+    }
+  }
+}
+
 /** Линия рисуется в координатах доски (у контейнера линии нет своего смещения). */
 export function drawLine(g: Graphics, item: LineItem, geom: LineGeom): void {
   const color = item.color ? hexToNum(item.color) : LINE;
   const width = item.width ?? 2;
-  if (geom.kind === 'bezier') {
+  const dash = item.dash ?? 'solid';
+  if (dash === 'dashed') {
+    dashPath(g, geom, width * 4 + 4, width * 2.5 + 3);
+  } else if (dash === 'dotted') {
+    // Точка — очень короткий отрезок с круглыми концами.
+    dashPath(g, geom, 0.01, width * 2.5 + 2);
+  } else if (geom.kind === 'bezier') {
     g.moveTo(geom.a.x, geom.a.y).bezierCurveTo(geom.c1.x, geom.c1.y, geom.c2.x, geom.c2.y, geom.b.x, geom.b.y);
   } else {
     g.moveTo(geom.points[0].x, geom.points[0].y);
     for (let i = 1; i < geom.points.length; i++) g.lineTo(geom.points[i].x, geom.points[i].y);
   }
-  g.stroke({ width, color, cap: 'round', join: 'round' });
+  g.stroke({ width, color, cap: dash === 'dashed' ? 'butt' : 'round', join: 'round' });
   drawCap(g, geom, false, item.start ?? 'none', width, color);
   drawCap(g, geom, true, item.end ?? 'arrow', width, color);
 }
@@ -158,6 +196,7 @@ export function labelSpec(item: BoxItem): LabelSpec | null {
     case 'link':
       return { ...base, text: item.url, fontSize: 15, color: 0x2f5bd3 };
     case 'frame':
+    case 'drawing':
       return null;
   }
 }
@@ -220,4 +259,44 @@ export function makeLabel(spec: LabelSpec, w: number, h: number, resolution: num
   }
   label.y = spec.vcenter ? Math.max(spec.pad, (h - label.height) / 2) : spec.pad + spec.top;
   return label;
+}
+
+/** Мышь не знает нажима — тогда толщину подсказывает скорость руки, как у perfect-freehand по умолчанию. */
+function noPressure(points: StrokePoint[]): boolean {
+  return points.every((p) => Math.abs(p.p - 0.5) < 0.01);
+}
+
+/** Контур штриха ручкой: мягкая линия, толщина которой зависит от нажима пера или скорости мыши. */
+export function penOutline(points: StrokePoint[], size: number, last: boolean): number[] {
+  const outline = getStroke(
+    points.map((p) => [p.x, p.y, p.p]),
+    { size, thinning: 0.55, smoothing: 0.5, streamline: 0.45, simulatePressure: noPressure(points), last },
+  );
+  return outline.flat();
+}
+
+/** Один штрих в координатах `pts` (уже пересчитанных в координаты объекта). */
+export function drawStroke(g: Graphics, stroke: Pick<Stroke, 'tool' | 'color' | 'size'>, pts: StrokePoint[], last = true): void {
+  if (!pts.length) return;
+  const color = hexToNum(stroke.color);
+  if (stroke.tool === 'marker') {
+    // Маркер-выделитель: широкий плоский полупрозрачный штрих. Один путь — поэтому в местах
+    // самопересечения цвет не темнеет, как у настоящего маркера.
+    g.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+    if (pts.length === 1) g.lineTo(pts[0].x + 0.01, pts[0].y);
+    g.stroke({ width: stroke.size, color, alpha: 0.38, cap: 'round', join: 'round' });
+    return;
+  }
+  const outline = penOutline(pts, stroke.size, last);
+  if (outline.length >= 6) g.poly(outline).fill(color);
+}
+
+/** Весь рисунок: штрихи записаны в размере `vw×vh`; если рисунок растянули — масштабируются. */
+export function drawStrokes(g: Graphics, item: DrawingItem): void {
+  const sx = item.w / (item.vw || item.w || 1), sy = item.h / (item.vh || item.h || 1);
+  for (const stroke of item.strokes) {
+    const pts = decodePoints(stroke.pts).map((p) => ({ x: p.x * sx, y: p.y * sy, p: p.p }));
+    drawStroke(g, stroke, pts);
+  }
 }

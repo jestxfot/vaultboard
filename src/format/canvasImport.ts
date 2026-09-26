@@ -77,7 +77,8 @@ function nodeToItem(n: CanvasNode, resolved: Record<string, string | null>, miss
       return compact({ ...box, kind: 'frame', title: n.label });
     case 'file': {
       const ref = n.file ?? '';
-      const file = resolved[ref] ?? ref;
+      // Заметки Obsidian лежат вне папки новой доски — записываем путь от корня базы.
+      const file = `/${resolved[ref] ?? ref}`;
       if (!resolved[ref]) missing.push(ref);
       if (/\.md$/i.test(file)) return compact({ ...box, kind: 'doc', file, subpath: n.subpath });
       if (IMAGE_EXT.test(file)) return compact({ ...box, kind: 'image', file });

@@ -456,7 +456,7 @@ export class Editor {
     const item = hit ? this.store.get(hit) : undefined;
     if (item?.kind === 'frame') this.editText(item.id, 'title');
     else if (item?.kind === 'image') this.onOpenImage?.(item.id);
-    else if (item?.kind === 'doc') this.onOpenDoc?.(item.file, 'read');
+    else if (item?.kind === 'doc') this.onOpenDoc?.(this.view.paths.toVault(item.file), 'read');
     else if (item && isLine(item)) this.editText(item.id, 'label');
     else if (hasText(item)) this.editText(item.id, 'text');
     else if (!item) this.createTextAt(w);
@@ -984,8 +984,8 @@ export class Editor {
         const id = this.id();
         const base = { id, x: round2(x), y: round2(at.y - maxH / 2), w: s.w, h: s.h };
         const item: BoxItem = s.f.pw && s.f.ph
-          ? { ...base, kind: 'image', file: s.f.path, pw: s.f.pw, ph: s.f.ph }
-          : { ...base, kind: 'file', file: s.f.path };
+          ? { ...base, kind: 'image', file: this.view.paths.toStored(s.f.path), pw: s.f.pw, ph: s.f.ph }
+          : { ...base, kind: 'file', file: this.view.paths.toStored(s.f.path) };
         this.store.insert(item);
         ids.push(id);
         x += s.w + gap;
@@ -998,7 +998,8 @@ export class Editor {
   placeDoc(path: string, at: Point): string {
     const w = 360, h = 440;
     const id = this.id();
-    this.store.transact('Документ', () => this.store.insert({ id, kind: 'doc', file: path, x: round2(at.x - w / 2), y: round2(at.y - h / 2), w, h }));
+    const file = this.view.paths.toStored(path);
+    this.store.transact('Документ', () => this.store.insert({ id, kind: 'doc', file, x: round2(at.x - w / 2), y: round2(at.y - h / 2), w, h }));
     this.select([id]);
     return id;
   }
@@ -1007,7 +1008,7 @@ export class Editor {
   replaceWithDoc(id: string, path: string): void {
     const item = this.store.get(id);
     if (!isBox(item)) return;
-    const next: BoxItem = { id: this.id(), kind: 'doc', file: path, x: item.x, y: item.y, w: Math.max(item.w, 240), h: Math.max(item.h, 200) };
+    const next: BoxItem = { id: this.id(), kind: 'doc', file: this.view.paths.toStored(path), x: item.x, y: item.y, w: Math.max(item.w, 240), h: Math.max(item.h, 200) };
     const index = this.store.indexOf(id);
     this.store.transact('В документ', () => {
       // Прицепленные линии переносим на новую карточку, а не теряем.
@@ -1020,6 +1021,34 @@ export class Editor {
       this.store.remove(id);
     });
     this.select([next.id]);
+  }
+
+  /** Файл выделенной карточки (документ, фото, другой файл) — для «Удалить файл». */
+  selectedFile(): { kind: string; file: string } | null {
+    if (this.selection.size !== 1) return null;
+    const item = this.store.get([...this.selection][0]);
+    return item && (item.kind === 'doc' || item.kind === 'image' || item.kind === 'file') ? { kind: item.kind, file: this.view.paths.toVault(item.file) } : null;
+  }
+
+  /** Убрать с доски все карточки этого файла (файл ушёл в корзину). */
+  removeItemsWithFile(path: string): void {
+    const ids = this.store.items.filter((i) => 'file' in i && this.view.paths.toVault(i.file) === path).map((i) => i.id);
+    this.store.transact('Удаление файла', () => {
+      for (const id of ids) this.store.remove(id);
+    });
+  }
+
+  /** Документ из [[ссылки]] в стикере: карточка справа от стикера, стрелка от стикера к ней. */
+  placeDocFrom(fromId: string, path: string): void {
+    const from = this.view.rectOf(fromId);
+    if (!from) return;
+    const w = 360, h = 440;
+    const id = this.id();
+    this.store.transact('Документ из ссылки', () => {
+      this.store.insert({ id, kind: 'doc', file: this.view.paths.toStored(path), x: round2(from.x + from.w + 120), y: round2(from.y + from.h / 2 - h / 2), w, h });
+      this.store.insert(makeLine(this.id(), { item: fromId }, { item: id }, 'curve', 'arrow'));
+    });
+    this.select([id]);
   }
 
   /** Выделить объект и показать его на экране. */
@@ -1171,7 +1200,7 @@ export class Editor {
         const only = this.selection.size === 1 ? this.store.get([...this.selection][0]) : undefined;
         if (only?.kind === 'frame') { handled(); this.editText(only.id, 'title'); }
         else if (only?.kind === 'image') { handled(); this.onOpenImage?.(only.id); }
-        else if (only?.kind === 'doc') { handled(); this.onOpenDoc?.(only.file, e.shiftKey ? 'edit' : 'read'); }
+        else if (only?.kind === 'doc') { handled(); this.onOpenDoc?.(this.view.paths.toVault(only.file), e.shiftKey ? 'edit' : 'read'); }
         else if (only && isLine(only)) { handled(); this.editText(only.id, 'label'); }
         else if (hasText(only)) { handled(); this.editText(only.id, 'text'); }
         break;

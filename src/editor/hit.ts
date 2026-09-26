@@ -1,25 +1,16 @@
 // Точные попадания: что под курсором и куда смотрит линия.
-import type { Point, LineGeom, Rect } from '../render/geometry.ts';
+import { type LineGeom, type Point, type Rect, samplePath } from '../render/geometry.ts';
 
-function distToSegment(p: Point, a: Point, b: Point): number {
+export function distToSegment(p: Point, a: Point, b: Point): number {
   const dx = b.x - a.x, dy = b.y - a.y;
   const len2 = dx * dx + dy * dy;
   const t = len2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
   return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }
 
-/** Линия как ломаная: кривую Безье приближаем 24 отрезками — для попадания мышью этого хватает. */
+/** Линия как ломаная — общая с отрисовкой. */
 export function geomPoints(g: LineGeom): Point[] {
-  if (g.kind === 'poly') return g.points;
-  const pts: Point[] = [];
-  for (let i = 0; i <= 24; i++) {
-    const t = i / 24, u = 1 - t;
-    pts.push({
-      x: u * u * u * g.a.x + 3 * u * u * t * g.c1.x + 3 * u * t * t * g.c2.x + t * t * t * g.b.x,
-      y: u * u * u * g.a.y + 3 * u * u * t * g.c1.y + 3 * u * t * t * g.c2.y + t * t * t * g.b.y,
-    });
-  }
-  return pts;
+  return samplePath(g);
 }
 
 export function distToLine(p: Point, g: LineGeom): number {

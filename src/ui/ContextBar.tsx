@@ -12,11 +12,25 @@ const SHAPE_NAMES: Record<ShapeKind, string> = {
   parallelogram: 'Параллелограмм', hexagon: 'Шестиугольник', star: 'Звезда', cylinder: 'Цилиндр', document: 'Документ',
 };
 
-export function ContextBar(props: { editor: Editor; ui: EditorUi; onConvertToDoc: () => void }) {
+export function ContextBar(props: {
+  editor: Editor;
+  ui: EditorUi;
+  onConvertToDoc: () => void;
+  onOpenLink: (fromId: string, target: string) => void;
+  onTrashFile: () => void;
+}) {
   const [colors, setColors] = createSignal(false);
   const kinds = () => props.ui.kinds;
   const only = (k: string) => kinds().length === 1 && kinds()[0] === k;
   const palette = () => (only('line') ? LINE_COLORS : STICKY_PALETTE);
+  /** [[Ссылки]] в тексте выделенного стикера или текста — по ним можно открыть или создать документ. */
+  const links = () => {
+    const sel = props.ui.selection.length === 1 ? props.editor.selectedText() : null;
+    if (!sel) return [];
+    const found = [...sel.text.matchAll(/\[\[([^\]\n]+)\]\]/g)].map((m) => m[1].trim());
+    return [...new Set(found)].slice(0, 4).map((target) => ({ id: sel.id, target }));
+  };
+  const file = () => (props.ui.selection.length === 1 ? props.editor.selectedFile() : null);
   const pos = () => {
     const b = props.ui.bbox!;
     const above = b.y - 56;
@@ -49,10 +63,23 @@ export function ContextBar(props: { editor: Editor; ui: EditorUi; onConvertToDoc
             В документ
           </button>
         </Show>
+        <For each={links()}>
+          {(l) => (
+            <button class="ctx-text ctx-link" title={`Открыть заметку «${l.target}», а если её нет — создать документ рядом`} onClick={() => props.onOpenLink(l.id, l.target)}>
+              ↗ {l.target.split('|').pop()}
+            </button>
+          )}
+        </For>
+        <Show when={file()}>
+          <span class="ctx-sep" />
+          <button class="ctx-text ctx-danger" title="Удалить сам файл с диска — в корзину базы (.trash), как в Obsidian" onClick={() => props.onTrashFile()}>
+            Удалить файл
+          </button>
+        </Show>
         <span class="ctx-sep" />
         <button class="ctx-btn" title="На передний план (Ctrl+])" onClick={() => props.editor.bringToFront()}><IconFront /></button>
         <button class="ctx-btn" title="На задний план (Ctrl+[)" onClick={() => props.editor.sendToBack()}><IconBack /></button>
-        <button class="ctx-btn" title="Удалить (Delete)" onClick={() => props.editor.deleteSelection()}><IconTrash /></button>
+        <button class="ctx-btn" title="Убрать с доски (Delete) — файл на диске остаётся" onClick={() => props.editor.deleteSelection()}><IconTrash /></button>
 
         <Show when={colors()}>
           <div class="ctx-palette">

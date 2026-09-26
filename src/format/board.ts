@@ -2,7 +2,9 @@
 // Такой файл открывается руками, git показывает понятные изменения, а читается он за миллисекунды.
 import type { BoardDoc, CommentThread, Item } from '../model/types.ts';
 
-export const FORMAT = 'vaultboard/1';
+export const FORMAT = 'vaultboard/2';
+/** Формат 1: пути к файлам записаны от корня базы. В формате 2 — относительно папки доски. */
+const FORMAT_V1 = 'vaultboard/1';
 
 export class BoardFormatError extends Error {}
 
@@ -22,7 +24,7 @@ export function parseBoard(text: string): BoardDoc {
     throw new BoardFormatError(`Файл доски повреждён: ${(err as Error).message}`);
   }
   if (!isObject(raw)) throw new BoardFormatError('Файл доски должен быть JSON-объектом');
-  if (raw.format !== FORMAT) throw new BoardFormatError(`Неизвестный формат доски: ${String(raw.format)}`);
+  if (raw.format !== FORMAT && raw.format !== FORMAT_V1) throw new BoardFormatError(`Неизвестный формат доски: ${String(raw.format)}`);
   if (!Array.isArray(raw.items)) throw new BoardFormatError('В доске нет списка items');
 
   const ids = new Set<string>();
@@ -34,11 +36,16 @@ export function parseBoard(text: string): BoardDoc {
     ids.add(item.id);
   }
 
+  // Доска формата 1: пути были от корня базы — в формате 2 это записывается с «/» в начале.
+  const items = raw.format === FORMAT_V1
+    ? (raw.items as Item[]).map((i) => ('file' in i && typeof i.file === 'string' && !i.file.startsWith('/') ? { ...i, file: `/${i.file}` } : i))
+    : (raw.items as Item[]);
+
   return {
     ...raw,
     format: FORMAT,
     meta: isObject(raw.meta) ? raw.meta : {},
-    items: raw.items as Item[],
+    items,
     comments: Array.isArray(raw.comments) ? (raw.comments as CommentThread[]) : [],
   };
 }

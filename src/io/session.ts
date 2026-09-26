@@ -2,7 +2,7 @@
 //
 // Сохранение — через полсекунды после последней правки, в фоне, атомарно. Если файл доски
 // изменили снаружи, молча не затираем: сообщаем и ждём решения.
-// Журнал истории дописывается порциями; его сверка с доской идёт по номеру версии `meta.rev`.
+// Журнал истории лежит в папке доски и дописывается порциями; его сверка с доской идёт по номеру версии `meta.rev`.
 import type { BoardStore } from '../model/store.ts';
 import { encodeOps, type LogLine, parseLog, rebuildHistory } from '../model/historyCodec.ts';
 import { serializeBoard } from '../format/board.ts';
@@ -48,7 +48,7 @@ export class BoardSession {
 
   /** Поднять историю с диска и начать следить за правками. Возвращает, сколько шагов отмены восстановлено. */
   async start(): Promise<number> {
-    const text = await vault.readHistory(this.boardId).catch(() => '');
+    const text = await vault.readHistory(this.path).catch(() => '');
     const rebuilt = text ? rebuildHistory(this.store.items, parseLog(text), this.store.rev) : null;
     if (rebuilt) this.store.restoreHistory(rebuilt.undo, rebuilt.redo);
     else this.queueLog({ v: 1, start: this.store.rev });
@@ -127,7 +127,7 @@ export class BoardSession {
     const chunk = `${this.logLines.join('\n')}\n`;
     this.logLines = [];
     try {
-      await vault.appendHistory(this.boardId, chunk);
+      await vault.appendHistory(this.path, chunk);
     } catch {
       // История не записалась — не страшно для доски: при следующем открытии журнал не сойдётся
       // по версии и начнётся заново. Саму доску это не трогает.

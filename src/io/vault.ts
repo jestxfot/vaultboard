@@ -58,13 +58,21 @@ export const vault = {
     return res.ok ? Number(res.headers.get('X-Mtime') ?? 0) : null;
   },
 
-  async readHistory(boardId: string): Promise<string> {
-    const res = await fetch(`/api/history?board=${encodeURIComponent(boardId)}`);
+  /** Убрать файл в корзину базы `.trash` (как Obsidian). */
+  async trash(path: string): Promise<string> {
+    const res = await fetch(`/api/trash?path=${encodeURIComponent(path)}`, { method: 'POST' });
+    const body = (await res.json().catch(() => ({}))) as { trashed?: string; error?: string };
+    if (!res.ok || !body.trashed) throw new Error(body.error ?? 'Не удалось удалить файл');
+    return body.trashed;
+  },
+
+  async readHistory(boardPath: string): Promise<string> {
+    const res = await fetch(`/api/history?board=${encodeURIComponent(boardPath)}`);
     return res.ok ? res.text() : '';
   },
 
-  async appendHistory(boardId: string, lines: string): Promise<void> {
-    const res = await fetch(`/api/history?board=${encodeURIComponent(boardId)}`, { method: 'POST', body: lines });
+  async appendHistory(boardPath: string, lines: string): Promise<void> {
+    const res = await fetch(`/api/history?board=${encodeURIComponent(boardPath)}`, { method: 'POST', body: lines });
     if (!res.ok) throw new Error('Не удалось записать историю');
   },
 
