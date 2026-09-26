@@ -98,10 +98,13 @@ function drawCap(g: Graphics, geom: LineGeom, atEnd: boolean, cap: EndCap, width
   else g.poly([tip.x, tip.y, tip.x - dx * size * 0.5 + px, tip.y - dy * size * 0.5 + py, bx, by, tip.x - dx * size * 0.5 - px, tip.y - dy * size * 0.5 - py]).fill(color);
 }
 
-/** Пунктир или точки: путь режется на отрезки по длине. В WebGL нет готового пунктира, поэтому так. */
-function dashPath(g: Graphics, geom: LineGeom, dash: number, gap: number): void {
+/**
+ * Пунктир любого рисунка: путь режется на отрезки по длине по шаблону «штрих, пробел, штрих, пробел…».
+ * В WebGL нет готового пунктира, поэтому так.
+ */
+function dashPath(g: Graphics, geom: LineGeom, pattern: number[]): void {
   const pts = samplePath(geom, 64);
-  let draw = true, left = dash;
+  let idx = 0, draw = true, left = pattern[0];
   let x = pts[0].x, y = pts[0].y;
   g.moveTo(x, y);
   for (let i = 1; i < pts.length; i++) {
@@ -118,7 +121,8 @@ function dashPath(g: Graphics, geom: LineGeom, dash: number, gap: number): void 
       left -= step;
       if (left <= 1e-6) {
         draw = !draw;
-        left = draw ? dash : gap;
+        idx = (idx + 1) % pattern.length;
+        left = pattern[idx];
       }
     }
   }
@@ -129,18 +133,23 @@ export function drawLine(g: Graphics, item: LineItem, geom: LineGeom): void {
   const color = item.color ? hexToNum(item.color) : LINE;
   const width = item.width ?? 2;
   const dash = item.dash ?? 'solid';
-  if (dash === 'dashed') {
-    dashPath(g, geom, width * 4 + 4, width * 2.5 + 3);
-  } else if (dash === 'dotted') {
-    // Точка — очень короткий отрезок с круглыми концами.
-    dashPath(g, geom, 0.01, width * 2.5 + 2);
+  // Точка — очень короткий отрезок с круглыми концами.
+  const dot = 0.01, gap = width * 2.5 + 3;
+  const patterns: Record<string, number[]> = {
+    dashed: [width * 4 + 4, gap],
+    longdash: [width * 9 + 10, gap + 2],
+    dotted: [dot, width * 2.5 + 2],
+    dashdot: [width * 5 + 6, gap, dot, gap],
+  };
+  if (patterns[dash]) {
+    dashPath(g, geom, patterns[dash]);
   } else if (geom.kind === 'bezier') {
     g.moveTo(geom.a.x, geom.a.y).bezierCurveTo(geom.c1.x, geom.c1.y, geom.c2.x, geom.c2.y, geom.b.x, geom.b.y);
   } else {
     g.moveTo(geom.points[0].x, geom.points[0].y);
     for (let i = 1; i < geom.points.length; i++) g.lineTo(geom.points[i].x, geom.points[i].y);
   }
-  g.stroke({ width, color, cap: dash === 'dashed' ? 'butt' : 'round', join: 'round' });
+  g.stroke({ width, color, cap: dash === 'dashed' || dash === 'longdash' ? 'butt' : 'round', join: 'round' });
   drawCap(g, geom, false, item.start ?? 'none', width, color);
   drawCap(g, geom, true, item.end ?? 'arrow', width, color);
 }
@@ -230,6 +239,26 @@ export function fitFontSize(spec: LabelSpec, w: number, h: number): number {
     if (m.lines.length * m.lineHeight <= h - spec.pad * 2 - spec.top) return size;
   }
   return FIT_SIZES[FIT_SIZES.length - 1];
+}
+
+/**
+ * Рамка свободного текста — ровно по тексту. Без `wrap` ширина — по самой длинной строке,
+ * с `wrap` — заданная ширина строки, текст переносится.
+ */
+export function textBox(text: string, fontSize: number, wrap?: number): { w: number; h: number } {
+  const pad = 2;
+  const style = new TextStyle({
+    fontFamily: FONT,
+    fontSize,
+    lineHeight: lineHeightOf(fontSize),
+    wordWrap: !!wrap,
+    breakWords: true,
+    wordWrapWidth: wrap ? Math.max(10, wrap - pad * 2) : 100000,
+  });
+  const m = CanvasTextMetrics.measureText(text || ' ', style);
+  const lines = Math.max(1, m.lines.length);
+  const w = wrap ?? Math.max(fontSize, Math.ceil(m.width) + pad * 2 + 2);
+  return { w: Math.round(w * 100) / 100, h: lines * m.lineHeight + pad * 2 };
 }
 
 /** Высота блока текста при заданной ширине — для текста, который растёт вниз по мере набора. */

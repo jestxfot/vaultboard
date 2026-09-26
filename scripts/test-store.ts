@@ -5,6 +5,8 @@ import { encodeOps, type LogLine, parseLog, rebuildHistory } from '../src/model/
 import { emptyBoard, serializeBoard } from '../src/format/board.ts';
 import { makeLine, makeSticky } from '../src/model/factory.ts';
 import type { StickyItem } from '../src/model/types.ts';
+import { recognize } from '../src/editor/recognize.ts';
+import { decodePoints, encodePoints, shiftPoints } from '../src/format/strokes.ts';
 
 let failed = 0;
 function check(ok: boolean, message: string): void {
@@ -117,6 +119,51 @@ check(ok, 'после перезапуска повтор доходит до п
 const fresh = new BoardStore(JSON.parse(saved));
 check(rebuildHistory(fresh.items, parseLog(text), store.rev + 5) === null, 'чужая версия доски — журнал не применяется');
 check(rebuildHistory(fresh.items, parseLog(text + '{"d":"обрыв'), store.rev) !== null, 'недописанная строка в конце не ломает журнал');
+
+console.log('\nРисование');
+{
+  // Дрожание руки — детерминированное, чтобы тест всегда давал один результат.
+  let seed = 7;
+  const jitter = (a: number) => {
+    seed = (seed * 16807) % 2147483647;
+    return ((seed / 2147483647) - 0.5) * a;
+  };
+  const path = (pts: [number, number][], steps = 20) => {
+    const out: { x: number; y: number }[] = [];
+    for (let i = 1; i < pts.length; i++) {
+      for (let k = 0; k < steps; k++) {
+        const t = k / steps;
+        out.push({ x: pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t + jitter(3), y: pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t + jitter(3) });
+      }
+    }
+    out.push({ x: pts[pts.length - 1][0], y: pts[pts.length - 1][1] });
+    return out;
+  };
+  const circle = Array.from({ length: 64 }, (_, i) => ({ x: 100 + Math.cos((i / 60) * Math.PI * 2) * 80 + jitter(4), y: 100 + Math.sin((i / 60) * Math.PI * 2) * 60 + jitter(4) }));
+  const cases: [string, { x: number; y: number }[], string][] = [
+    ['круг', circle, 'shape:ellipse'],
+    ['квадрат', path([[0, 0], [200, 0], [200, 150], [0, 150], [0, 0]]), 'shape:rect'],
+    ['ромб', path([[100, 0], [200, 80], [100, 160], [0, 80], [100, 0]]), 'shape:diamond'],
+    ['треугольник', path([[100, 0], [200, 170], [0, 170], [100, 0]]), 'shape:triangle'],
+    ['прямая', path([[0, 0], [300, 120]]), 'line'],
+    ['каракуля', path([[0, 0], [60, 90], [120, 10], [180, 100], [240, 20]]), 'null'],
+  ];
+  for (const [name, pts, want] of cases) {
+    const r = recognize(pts, 30);
+    const got = r ? (r.kind === 'shape' ? `shape:${r.shape}` : 'line') : 'null';
+    check(got === want, `умное рисование: ${name} → ${got}`);
+  }
+
+  const stroke = Array.from({ length: 200 }, (_, i) => ({ x: 1000 + i * 1.37, y: 500 + Math.sin(i / 10) * 40, p: 0.3 + (i % 50) / 100 }));
+  const packed = encodePoints(stroke);
+  const back = decodePoints(packed);
+  const maxErr = Math.max(...stroke.map((p, i) => Math.max(Math.abs(p.x - back[i].x), Math.abs(p.y - back[i].y))));
+  const json = JSON.stringify(packed).length, raw = JSON.stringify(stroke).length;
+  check(maxErr <= 0.05 + 1e-9, `точки штриха после сжатия отличаются не больше чем на 0,05 (на деле ${maxErr.toFixed(3)})`);
+  check(json * 3 < raw, `сжатый штрих занимает ${json} байт вместо ${raw}`);
+  const shifted = decodePoints(shiftPoints(packed, 10, -5));
+  check(Math.abs(shifted[199].x - back[199].x - 10) < 0.06 && Math.abs(shifted[199].y - back[199].y + 5) < 0.06, 'сдвиг рисунка меняет одну точку, а двигает весь штрих');
+}
 
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');
 process.exit(failed ? 1 : 0);

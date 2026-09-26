@@ -631,7 +631,10 @@ export class BoardView {
     if (item.kind === 'image' && this.updatePhoto(v, item)) return;
 
     // Текст — тонкая полоска, по её высоте порог не считаем: он виден, пока читается шрифт.
-    const wantNear = item.kind === 'text'
+    // Рисунок всегда рисуется полностью: заменять его цветным прямоугольником издалека было бы странно.
+    const wantNear = item.kind === 'drawing'
+      ? true
+      : item.kind === 'text'
       ? (item.fontSize ?? 18) * zoom >= MIN_TEXT_PX
       : Math.min(item.w, item.h) * zoom >= NEAR_PX;
     if (wantNear && v.gfx) {

@@ -6,6 +6,7 @@ export type ShapeKind =
   | 'parallelogram' | 'hexagon' | 'star' | 'cylinder' | 'document';
 export type EndCap = 'none' | 'arrow' | 'dot' | 'diamond';
 export type PathKind = 'straight' | 'curve' | 'elbow';
+export type DashKind = 'solid' | 'dashed' | 'longdash' | 'dotted' | 'dashdot';
 
 interface Common {
   id: string;
@@ -27,8 +28,8 @@ export interface FrameItem extends Box { kind: 'frame'; title?: string }
 export interface StickyItem extends Box { kind: 'sticky'; text: string }
 /** Карточка с рамкой и markdown внутри доски. */
 export interface CardItem extends Box { kind: 'card'; text: string }
-/** Свободный текст без рамки. */
-export interface TextItem extends Box { kind: 'text'; text: string; fontSize?: number }
+/** Свободный текст без рамки. Рамка всегда по тексту; `wrap` — ширина строки, если её задали боковыми ручками. */
+export interface TextItem extends Box { kind: 'text'; text: string; fontSize?: number; wrap?: number }
 export interface ShapeItem extends Box { kind: 'shape'; shape: ShapeKind; text?: string }
 /** Ссылка на markdown-файл на диске. Файл — обычная заметка, без нашего формата. */
 export interface DocItem extends Box { kind: 'doc'; file: string; subpath?: string }
@@ -68,7 +69,7 @@ export interface LineItem extends Common {
   end?: EndCap;
   color?: string;
   width?: number;
-  dash?: 'solid' | 'dashed' | 'dotted';
+  dash?: DashKind;
   label?: string;
 }
 

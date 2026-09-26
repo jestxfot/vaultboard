@@ -239,3 +239,16 @@ html, body, #root { margin: 0; height: 100%; overflow: hidden; background: var(-
 .ctx-link { color: var(--accent); }
 .ctx-danger { color: var(--bad); }
 .ctx-danger:hover { background: #fff0f1; }
+
+/* ---------- этап 4: линии и рисование ---------- */
+.ctx-btn.active { background: #e8ecff; color: var(--accent); }
+.ctx-cap { display: flex; align-items: center; gap: 2px; padding: 0 4px; color: var(--muted); }
+.ctx-cap select { font: inherit; font-size: 12px; border: 1px solid var(--line); border-radius: 5px; padding: 2px; background: var(--panel); }
+.draw-menu { width: 230px; display: flex; flex-direction: column; }
+.presets { display: flex; gap: 6px; padding: 2px 8px 8px; }
+.preset { width: 40px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer; }
+.preset.active { border-color: var(--accent); box-shadow: 0 0 0 2px #dfe5ff; }
+.preset span { border-radius: 50%; display: block; border: 1px solid rgba(0,0,0,.1); }
+.draw-colors { display: flex; flex-wrap: wrap; gap: 5px; padding: 2px 8px 8px; }
+.draw-sizes { display: flex; gap: 2px; padding: 0 4px 4px; }
+.size-dot { display: block; border-radius: 50%; background: var(--ink); }

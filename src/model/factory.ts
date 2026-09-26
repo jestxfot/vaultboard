@@ -10,15 +10,15 @@ export function newId(exists: (id: string) => boolean): string {
 }
 
 export const STICKY_SIZE = 200;
-export const TEXT_WIDTH = 320;
 export const TEXT_FONT = 18;
 
 export function makeSticky(id: string, cx: number, cy: number, color: string = DEFAULT_STICKY): StickyItem {
   return { id, kind: 'sticky', x: cx - STICKY_SIZE / 2, y: cy - STICKY_SIZE / 2, w: STICKY_SIZE, h: STICKY_SIZE, color, text: '' };
 }
 
+/** Пустой текст — узкая рамка под курсор; дальше она растёт ровно по набранному. */
 export function makeText(id: string, x: number, y: number): TextItem {
-  return { id, kind: 'text', x, y, w: TEXT_WIDTH, h: Math.round(TEXT_FONT * 1.35) + 4, text: '', fontSize: TEXT_FONT };
+  return { id, kind: 'text', x, y, w: TEXT_FONT * 2, h: Math.round(TEXT_FONT * 1.35) + 4, text: '', fontSize: TEXT_FONT };
 }
 
 export function shapeSize(shape: ShapeKind): { w: number; h: number } {

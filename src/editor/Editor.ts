@@ -8,18 +8,72 @@
 // Горячие клавиши работают по физическим клавишам (e.code), поэтому одинаково в русской и английской раскладке.
 import type { Graphics } from 'pixi.js';
 import type { BoardStore, Op } from '../model/store.ts';
-import type { BoxItem, EndCap, Endpoint, FrameItem, Item, LineItem, PathKind, ShapeKind, Side } from '../model/types.ts';
+import type { BoxItem, DashKind, DrawingItem, EndCap, Endpoint, FrameItem, Item, LineItem, PathKind, ShapeKind, Side, Stroke, TextItem } from '../model/types.ts';
 import { isLine } from '../model/types.ts';
 import { makeFrame, makeLine, makeShape, makeSticky, makeText, newId, shapeSize, STICKY_SIZE } from '../model/factory.ts';
 import { DEFAULT_STICKY } from '../format/colors.ts';
 import type { BoardView } from '../render/BoardView.ts';
 import type { PerfMonitor } from '../perf/monitor.ts';
 import { type Anchor, geomBounds, lineGeometry, lineMidpoint, type Point, type Rect, resolveAnchor } from '../render/geometry.ts';
-import { textBlockHeight } from '../render/draw.ts';
-import { distToLine, geomPoints, inRect, rectContains, rectFromPoints, rectsIntersect, round2, unionRect } from './hit.ts';
+import { drawStroke, textBox } from '../render/draw.ts';
+import { decodePoints, encodePoints, shiftPoints, type StrokePoint } from '../format/strokes.ts';
+import { recognize } from './recognize.ts';
+import { distToLine, distToSegment, geomPoints, inRect, rectContains, rectFromPoints, rectsIntersect, round2, unionRect } from './hit.ts';
 import { type CloseReason, type EditField, TextEditor } from './TextEditor.ts';
 
-export type Tool = 'select' | 'sticky' | 'text' | 'shape' | 'line' | 'frame';
+export type Tool = 'select' | 'sticky' | 'text' | 'shape' | 'line' | 'frame' | 'pen' | 'marker' | 'eraser' | 'lasso';
+
+/** Быстрая кисть: цвет и толщина. У ручки их три, как в Miro. */
+export interface PenPreset {
+  color: string;
+  size: number;
+}
+
+const DEFAULT_PRESETS: PenPreset[] = [
+  { color: '#1a1a1a', size: 3 },
+  { color: '#e93147', size: 6 },
+  { color: '#08b94e', size: 12 },
+];
+const PRESETS_KEY = 'vaultboard:pen-presets';
+const DRAW_TOOLS = new Set<Tool>(['pen', 'marker', 'eraser', 'lasso']);
+
+function loadPresets(): PenPreset[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PRESETS_KEY) ?? 'null') as PenPreset[] | null;
+    if (Array.isArray(raw) && raw.length === 3) return raw;
+  } catch {
+    // Нет доступа к хранилищу браузера — берём кисти по умолчанию.
+  }
+  return DEFAULT_PRESETS.map((p) => ({ ...p }));
+}
+
+/** Точка внутри многоугольника (лассо). */
+function inPolygon(p: Point, poly: Point[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+/** Точки штрихов рисунка в координатах доски. Объекты не меняются, поэтому кэш по самому объекту надёжен. */
+const strokeCache = new WeakMap<DrawingItem, StrokePoint[][]>();
+function drawingPoints(d: DrawingItem): StrokePoint[][] {
+  let cached = strokeCache.get(d);
+  if (!cached) {
+    const sx = d.w / (d.vw || d.w || 1), sy = d.h / (d.vh || d.h || 1);
+    cached = d.strokes.map((s) => decodePoints(s.pts).map((q) => ({ x: d.x + q.x * sx, y: d.y + q.y * sy, p: q.p })));
+    strokeCache.set(d, cached);
+  }
+  return cached;
+}
+
+function nearStroke(pts: StrokePoint[], w: Point, r: number): boolean {
+  if (pts.length === 1) return Math.hypot(pts[0].x - w.x, pts[0].y - w.y) <= r;
+  for (let i = 1; i < pts.length; i++) if (distToSegment(w, pts[i - 1], pts[i]) <= r) return true;
+  return false;
+}
 type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 const BLUE = 0x4262ff;
@@ -45,7 +99,10 @@ type Gesture =
   | { kind: 'resize'; handle: Handle; start: Rect; boxes: Map<string, BoxItem>; aspect: boolean }
   | { kind: 'create'; tool: Tool; start: Point; end: Point }
   | { kind: 'line'; from: Endpoint; end: Point; target: string | null }
-  | { kind: 'endpoint'; lineId: string; which: 'from' | 'to'; target: string | null };
+  | { kind: 'endpoint'; lineId: string; which: 'from' | 'to'; target: string | null }
+  | { kind: 'draw'; tool: 'pen' | 'marker'; color: string; size: number; smart: boolean; points: StrokePoint[]; predicted: StrokePoint[] }
+  | { kind: 'erase'; last: Point }
+  | { kind: 'lasso'; points: Point[] };
 
 export interface EditorUi {
   tool: Tool;
@@ -61,6 +118,10 @@ export interface EditorUi {
   busy: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  presets: PenPreset[];
+  preset: number;
+  markerColor: string;
+  smart: boolean;
 }
 
 const HANDLE_CURSOR: Record<Handle, string> = {
@@ -82,6 +143,13 @@ export class Editor {
   linePath: PathKind = 'straight';
   lineEnd: EndCap = 'arrow';
   stickyColor: string = DEFAULT_STICKY;
+  /** Три быстрые кисти ручки и какая выбрана. */
+  presets: PenPreset[] = loadPresets();
+  preset = 0;
+  markerColor = '#ffe55c';
+  markerSize = 22;
+  /** Умное рисование: нарисованное от руки превращается в фигуру или линию. */
+  smart = false;
   readonly selection = new Set<string>();
   /** Изменилось что-то, что показывает интерфейс вокруг доски. */
   onUi: (() => void) | null = null;
@@ -108,6 +176,8 @@ export class Editor {
   private pointerDirty = false;
   private hover: string | null = null;
   private spaceDown = false;
+  /** Последний рисунок: штрихи, нарисованные подряд и рядом, добавляются в него, а не плодят объекты. */
+  private lastDrawing: { id: string; time: number } | null = null;
   private readonly cleanup: (() => void)[] = [];
 
   constructor(store: BoardStore, view: BoardView, host: HTMLElement, perf: PerfMonitor) {
@@ -143,6 +213,10 @@ export class Editor {
       busy,
       canUndo: this.store.canUndo,
       canRedo: this.store.canRedo,
+      presets: this.presets,
+      preset: this.preset,
+      markerColor: this.markerColor,
+      smart: this.smart,
     };
   }
 
@@ -258,15 +332,37 @@ export class Editor {
     if (this.text.activeId) this.text.close('outside');
     const p = this.readPointer(e);
     this.pointer = p;
-    this.host.setPointerCapture(e.pointerId);
+    try {
+      this.host.setPointerCapture(e.pointerId);
+    } catch {
+      // Указатель уже отпущен (или событие не от настоящего устройства) — работаем без захвата.
+    }
     e.preventDefault();
 
     if (e.button === 1 || e.button === 2 || this.spaceDown) {
       this.startPan(p, false);
       return;
     }
-    if (e.button !== 0) return;
+    if (e.button !== 0 && !(e.pointerType === 'pen' && e.buttons & 32)) return;
     const w = { x: p.wx, y: p.wy };
+
+    // Обратный конец пера (кнопка-ластик) стирает при любом инструменте.
+    if (e.pointerType === 'pen' && e.buttons & 32) {
+      this.startErase(w);
+      return;
+    }
+    if (this.tool === 'pen' || this.tool === 'marker') {
+      this.startDraw(e, this.tool);
+      return;
+    }
+    if (this.tool === 'eraser') {
+      this.startErase(w);
+      return;
+    }
+    if (this.tool === 'lasso') {
+      this.gesture = { kind: 'lasso', points: [w] };
+      return;
+    }
 
     if (this.tool === 'text') {
       this.createTextAt(w);
@@ -323,6 +419,11 @@ export class Editor {
       if (!p.shift) this.select([]);
       return;
     }
+    // По пустому месту перо планшета рисует сразу, без выбора инструмента; мышь — с зажатым Alt.
+    if (e.pointerType === 'pen' || p.alt) {
+      this.startDraw(e, 'pen');
+      return;
+    }
     this.startPan(p, true);
   }
 
@@ -334,6 +435,22 @@ export class Editor {
   private onPointerMove(e: PointerEvent): void {
     this.pointer = this.readPointer(e);
     if (this.gesture) this.perf.noteInput(e.timeStamp);
+    const g = this.gesture;
+    if (g?.kind === 'draw') {
+      // Все промежуточные точки от пера и мыши, а не только последняя: линия не рубится на отрезки.
+      for (const ce of e.getCoalescedEvents?.() ?? [e]) g.points.push(this.strokePoint(ce));
+      // Предсказанные точки рисуются только в черновике штриха — чтобы линия не отставала от руки.
+      g.predicted = (e.getPredictedEvents?.() ?? []).map((pe) => this.strokePoint(pe));
+      this.view.invalidateOverlay();
+    } else if (g?.kind === 'lasso') {
+      for (const ce of e.getCoalescedEvents?.() ?? [e]) {
+        const q = this.readPointer(ce);
+        g.points.push({ x: q.wx, y: q.wy });
+      }
+      this.view.invalidateOverlay();
+    } else if (DRAW_TOOLS.has(this.tool)) {
+      this.view.invalidateOverlay();
+    }
     this.pointerDirty = true;
     this.view.requestFrame();
   }
@@ -393,19 +510,33 @@ export class Editor {
         this.view.invalidateOverlay();
         break;
       case 'line':
-        g.end = w;
-        g.target = this.hitBox(w, 'item' in g.from ? g.from.item : undefined);
+        if (p.shift) {
+          // Shift — ровная линия: угол прилипает к шагу 45° (горизонталь, вертикаль, диагонали).
+          g.end = this.snapAngle(this.endpointPoint(g.from), w);
+          g.target = null;
+        } else {
+          g.end = w;
+          g.target = this.hitBox(w, 'item' in g.from ? g.from.item : undefined);
+        }
         this.view.invalidateOverlay();
         break;
       case 'endpoint': {
         const line = this.store.get(g.lineId) as LineItem | undefined;
         if (!line) break;
         const other = g.which === 'from' ? line.to : line.from;
-        g.target = this.hitBox(w, 'item' in other ? other.item : undefined);
-        const ep: Endpoint = g.target ? { item: g.target } : { x: round2(w.x), y: round2(w.y) };
+        const at = p.shift ? this.snapAngle(this.endpointPoint(other), w) : w;
+        g.target = p.shift ? null : this.hitBox(w, 'item' in other ? other.item : undefined);
+        const ep: Endpoint = g.target ? { item: g.target } : { x: round2(at.x), y: round2(at.y) };
         this.store.live(() => this.store.update<LineItem>(g.lineId, { [g.which]: ep }));
         break;
       }
+      case 'erase':
+        this.eraseAlong(g.last, w);
+        g.last = w;
+        break;
+      case 'draw':
+      case 'lasso':
+        break;
     }
   }
 
@@ -416,6 +547,7 @@ export class Editor {
     this.gesture = null;
     this.host.style.cursor = this.tool === 'select' ? (this.spaceDown ? 'grab' : '') : 'crosshair';
     if (!g) return;
+    if (g.kind === 'draw') g.predicted = [];
     const p = this.pointer ?? this.readPointer(e);
     const w = { x: p.wx, y: p.wy };
 
@@ -434,7 +566,14 @@ export class Editor {
       case 'move':
       case 'resize':
       case 'endpoint':
+      case 'erase':
         this.store.endGesture();
+        break;
+      case 'draw':
+        this.finishDraw(g);
+        break;
+      case 'lasso':
+        this.finishLasso(g.points);
         break;
       case 'marquee':
         break;
@@ -442,7 +581,7 @@ export class Editor {
         this.finishCreate(g.tool, g.start, w);
         break;
       case 'line':
-        this.finishLine(g.from, w, g.target);
+        this.finishLine(g.from, g.end, g.target);
         break;
     }
     this.changed();
@@ -478,6 +617,8 @@ export class Editor {
       } else if (item.kind === 'frame') {
         const titleW = Math.max(item.w * 0.5, 140 / z);
         if (w.x >= item.x && w.x <= item.x + Math.min(item.w, titleW) && w.y >= item.y - 24 / z && w.y <= item.y) return item.id;
+      } else if (item.kind === 'drawing') {
+        if (inRect(w, item, tol) && drawingPoints(item).some((pts, i) => nearStroke(pts, w, tol + item.strokes[i].size / 2))) return item.id;
       } else if (inRect(w, item)) {
         return item.id;
       }
@@ -535,6 +676,8 @@ export class Editor {
     // Любой объект, включая стикеры, тянется за любую ручку в любые пропорции. Shift за угол — сохранить пропорции.
     // Фото — только за углы и без искажения, как в Miro.
     if (r.w < 40 || r.h < 40 || boxes.every((b) => b.kind === 'image')) return corners;
+    // Текст: углы увеличивают сам текст, боковые ручки меняют ширину строки.
+    if (boxes.every((b) => b.kind === 'text')) return [...corners, { handle: 'e', x: x1, y: ym }, { handle: 'w', x: x0, y: ym }];
     return [...corners, { handle: 'n', x: xm, y: y0 }, { handle: 'e', x: x1, y: ym }, { handle: 's', x: xm, y: y1 }, { handle: 'w', x: x0, y: ym }];
   }
 
@@ -661,7 +804,8 @@ export class Editor {
     const boxes = new Map(this.selectedBoxes().filter((b) => !b.locked).map((b) => [b.id, b]));
     const start = unionRect([...boxes.values()]);
     if (!start) return;
-    const aspect = shift || [...boxes.values()].every((b) => b.kind === 'image');
+    // Фото и текст за угол меняются пропорционально: текст при этом увеличивается целиком, вместе со шрифтом.
+    const aspect = shift || [...boxes.values()].every((b) => b.kind === 'image' || b.kind === 'text');
     this.store.beginGesture('Размер');
     this.gesture = { kind: 'resize', handle, start, boxes, aspect };
   }
@@ -693,9 +837,18 @@ export class Editor {
           w: round2(Math.max(10, o.w * sx)),
           h: round2(Math.max(10, o.h * sy)),
         };
-        // Свободный текст за угол масштабируется целиком — вместе со шрифтом, как в Miro.
-        if (o.kind === 'text' && corner && sx === sy) patch.fontSize = round2(Math.max(6, (o.fontSize ?? 18) * sx));
-        if (o.kind === 'text' && !corner) patch.h = round2(textBlockHeight(o.text, patch.w!, o.fontSize ?? 18, 2));
+        if (o.kind === 'text') {
+          // Свободный текст: за угол увеличивается сам текст (шрифт), за бок — ширина строки. Рамка — по тексту.
+          const t = o as TextItem;
+          const fontSize = corner ? round2(Math.max(6, (t.fontSize ?? 18) * sx)) : (t.fontSize ?? 18);
+          const wrap = corner ? (t.wrap ? round2(t.wrap * sx) : undefined) : round2(Math.max(fontSize * 2, patch.w!));
+          const box = textBox(t.text, fontSize, wrap);
+          Object.assign(patch, { fontSize, w: box.w, h: box.h });
+          if (wrap) (patch as Partial<TextItem>).wrap = wrap;
+          // Ручка слева или сверху: правый/нижний край стоит на месте.
+          if (g.handle.includes('w')) patch.x = round2(x1 - box.w);
+          if (g.handle.includes('n')) patch.y = round2(y1 - box.h);
+        }
         this.store.update<BoxItem>(id, patch);
       }
     });
@@ -829,8 +982,8 @@ export class Editor {
       this.store.update<BoxItem>(id, (item) => {
         if (field === 'title') return { ...item, title: value } as BoxItem;
         const next = { ...item, text: value } as BoxItem;
-        // Свободный текст растёт вниз по мере набора.
-        if (item.kind === 'text') next.h = round2(textBlockHeight(value, item.w, item.fontSize ?? 18, 2));
+        // Рамка свободного текста всегда ровно по тексту.
+        if (item.kind === 'text') Object.assign(next, textBox(value, item.fontSize ?? 18, item.wrap));
         return next;
       }),
     );
@@ -873,6 +1026,7 @@ export class Editor {
   setColor(color: string | undefined): void {
     this.store.transact('Цвет', () => {
       for (const id of this.selection) this.store.update(id, (item) => {
+        if (item.kind === 'drawing') return color ? { ...item, strokes: item.strokes.map((st) => ({ ...st, color })) } : item;
         const next = { ...item } as Item & { color?: string };
         if (color) next.color = color;
         else delete next.color;
@@ -893,6 +1047,197 @@ export class Editor {
     this.store.transact('Вид линии', () => {
       for (const id of this.selection) if (isLine(this.store.get(id)!)) this.store.update<LineItem>(id, { path });
     });
+  }
+
+  setLineWidth(width: number): void {
+    this.store.transact('Толщина линии', () => {
+      for (const id of this.selection) if (isLine(this.store.get(id)!)) this.store.update<LineItem>(id, { width });
+    });
+  }
+
+  setLineDash(dash: DashKind): void {
+    this.store.transact('Вид линии', () => {
+      for (const id of this.selection) if (isLine(this.store.get(id)!)) this.store.update<LineItem>(id, { dash });
+    });
+  }
+
+  setCap(which: 'start' | 'end', cap: EndCap): void {
+    this.store.transact('Наконечник', () => {
+      for (const id of this.selection) if (isLine(this.store.get(id)!)) this.store.update<LineItem>(id, { [which]: cap });
+    });
+  }
+
+  /** Первая выделенная линия — чтобы панель показала её текущие настройки. */
+  selectedLine(): LineItem | null {
+    for (const id of this.selection) {
+      const item = this.store.get(id);
+      if (item && isLine(item)) return item;
+    }
+    return null;
+  }
+
+  /** Точка конца линии: центр объекта или сама точка. */
+  private endpointPoint(ep: Endpoint): Point {
+    if ('item' in ep) {
+      const r = this.view.rectOf(ep.item);
+      return r ? { x: r.x + r.w / 2, y: r.y + r.h / 2 } : { x: 0, y: 0 };
+    }
+    return { x: ep.x, y: ep.y };
+  }
+
+  /** Конец отрезка с углом, округлённым до 45°, той же длины. */
+  private snapAngle(from: Point, to: Point): Point {
+    const len = Math.hypot(to.x - from.x, to.y - from.y);
+    const step = Math.PI / 4;
+    const angle = Math.round(Math.atan2(to.y - from.y, to.x - from.x) / step) * step;
+    return { x: from.x + Math.cos(angle) * len, y: from.y + Math.sin(angle) * len };
+  }
+
+  // ---------- рисование ----------
+
+  setPreset(index: number): void {
+    this.preset = index;
+    this.setTool('pen');
+  }
+
+  /** Поменять цвет или толщину выбранной кисти; кисти запоминаются в браузере. */
+  updatePreset(change: Partial<PenPreset>): void {
+    if (this.tool === 'marker') {
+      if (change.color) this.markerColor = change.color;
+      if (change.size) this.markerSize = change.size;
+    } else {
+      this.presets = this.presets.map((p, i) => (i === this.preset ? { ...p, ...change } : p));
+      try {
+        localStorage.setItem(PRESETS_KEY, JSON.stringify(this.presets));
+      } catch {
+        // Не запомнится — не страшно.
+      }
+    }
+    this.changed();
+  }
+
+  toggleSmart(): void {
+    this.smart = !this.smart;
+    this.setTool('pen');
+  }
+
+  private strokePoint(e: PointerEvent): StrokePoint {
+    const q = this.readPointer(e);
+    // У мыши нет нажима: 0.5 — знак для отрисовки подсказывать толщину скоростью руки.
+    return { x: q.wx, y: q.wy, p: e.pointerType === 'pen' ? Math.max(0.05, e.pressure || 0.5) : 0.5 };
+  }
+
+  private startDraw(e: PointerEvent, tool: 'pen' | 'marker'): void {
+    const preset = this.presets[this.preset];
+    this.gesture = {
+      kind: 'draw',
+      tool,
+      color: tool === 'marker' ? this.markerColor : preset.color,
+      size: tool === 'marker' ? this.markerSize : preset.size,
+      smart: this.smart && tool === 'pen',
+      points: [this.strokePoint(e)],
+      predicted: [],
+    };
+  }
+
+  private finishDraw(g: Extract<Gesture, { kind: 'draw' }>): void {
+    const pts = g.points;
+    if (!pts.length) return;
+    if (g.smart) {
+      const rec = recognize(pts, 30 / this.view.cam.zoom);
+      if (rec?.kind === 'shape') {
+        const item = makeShape(this.id(), rec.shape, round2(rec.x), round2(rec.y), round2(Math.max(rec.w, 10)), round2(Math.max(rec.h, 10)));
+        this.store.transact('Фигура от руки', () => this.store.insert(item));
+        this.select([item.id]);
+        return;
+      }
+      if (rec?.kind === 'line') {
+        // Прямая от объекта к объекту становится стрелкой между ними.
+        const fromId = this.hitBox(rec.a), toId = this.hitBox(rec.b, fromId ?? undefined);
+        const from: Endpoint = fromId ? { item: fromId } : { x: round2(rec.a.x), y: round2(rec.a.y) };
+        const to: Endpoint = toId ? { item: toId } : { x: round2(rec.b.x), y: round2(rec.b.y) };
+        const item = makeLine(this.id(), from, to, 'straight', fromId && toId ? 'arrow' : 'none');
+        this.store.transact('Линия от руки', () => this.store.insert(item));
+        this.select([item.id]);
+        return;
+      }
+    }
+    this.addStroke({ tool: g.tool, color: g.color, size: g.size }, pts);
+  }
+
+  /** Штрих ложится в последний рисунок, если тот рядом и нарисован только что; иначе начинается новый рисунок. */
+  private addStroke(style: Pick<Stroke, 'tool' | 'color' | 'size'>, pts: StrokePoint[]): void {
+    const pad = style.size / 2 + 2;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const q of pts) {
+      x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y);
+      x1 = Math.max(x1, q.x); y1 = Math.max(y1, q.y);
+    }
+    const bb = { x: x0 - pad, y: y0 - pad, w: x1 - x0 + pad * 2, h: y1 - y0 + pad * 2 };
+    const reach = 120 / this.view.cam.zoom;
+    const recent = this.lastDrawing && Date.now() - this.lastDrawing.time < 6000 ? this.store.get(this.lastDrawing.id) : undefined;
+    const last = recent?.kind === 'drawing' && recent.w === recent.vw && recent.h === recent.vh ? recent : null;
+
+    if (last && rectsIntersect({ x: last.x - reach, y: last.y - reach, w: last.w + reach * 2, h: last.h + reach * 2 }, bb)) {
+      const u = unionRect([last, bb])!;
+      const ux = round2(u.x), uy = round2(u.y), uw = round2(u.w + (u.x - ux)), uh = round2(u.h + (u.y - uy));
+      const strokes = last.strokes.map((st) => ({ ...st, pts: shiftPoints(st.pts, last.x - ux, last.y - uy) }));
+      strokes.push({ ...style, pts: encodePoints(pts.map((q) => ({ x: q.x - ux, y: q.y - uy, p: q.p }))) });
+      this.store.transact('Рисунок', () => this.store.update<DrawingItem>(last.id, { x: ux, y: uy, w: uw, h: uh, vw: uw, vh: uh, strokes }));
+      this.lastDrawing = { id: last.id, time: Date.now() };
+      return;
+    }
+    const x = round2(bb.x), y = round2(bb.y), w = round2(bb.w), h = round2(bb.h);
+    const item: DrawingItem = {
+      id: this.id(),
+      kind: 'drawing',
+      x, y, w, h, vw: w, vh: h,
+      strokes: [{ ...style, pts: encodePoints(pts.map((q) => ({ x: q.x - x, y: q.y - y, p: q.p }))) }],
+    };
+    this.store.transact('Рисунок', () => this.store.insert(item));
+    this.lastDrawing = { id: item.id, time: Date.now() };
+  }
+
+  private startErase(w: Point): void {
+    this.store.beginGesture('Ластик');
+    this.gesture = { kind: 'erase', last: w };
+    this.eraseAlong(w, w);
+  }
+
+  /** Ластик стирает штрихи целиком — те, по которым провёл. Опустевший рисунок исчезает. */
+  private eraseAlong(a: Point, b: Point): void {
+    const r = 10 / this.view.cam.zoom;
+    const area = { x: Math.min(a.x, b.x) - r, y: Math.min(a.y, b.y) - r, w: Math.abs(b.x - a.x) + r * 2, h: Math.abs(b.y - a.y) + r * 2 };
+    const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / r));
+    const probes = Array.from({ length: steps + 1 }, (_, i) => ({ x: a.x + ((b.x - a.x) * i) / steps, y: a.y + ((b.y - a.y) * i) / steps }));
+    for (const item of this.view.search(area)) {
+      if (item.kind !== 'drawing' || item.locked) continue;
+      const all = drawingPoints(item);
+      const keep = item.strokes.filter((st, i) => !probes.some((q) => nearStroke(all[i], q, r + st.size / 2)));
+      if (keep.length === item.strokes.length) continue;
+      this.store.live(() => {
+        if (keep.length) this.store.update<DrawingItem>(item.id, { strokes: keep });
+        else this.store.remove(item.id);
+      });
+    }
+  }
+
+  /** Лассо: выделить всё, что обвели петлёй. */
+  private finishLasso(poly: Point[]): void {
+    if (poly.length < 3) return;
+    const r = unionRect(poly.map((q) => ({ x: q.x, y: q.y, w: 0, h: 0 })))!;
+    const ids: string[] = [];
+    for (const item of this.view.search(r)) {
+      if (isLine(item)) {
+        const geom = this.view.lineGeomOf(item);
+        const pts = geom ? geomPoints(geom) : [];
+        if (pts.length && inPolygon(pts[0], poly) && inPolygon(pts[pts.length - 1], poly)) ids.push(item.id);
+      } else if (inPolygon({ x: item.x + item.w / 2, y: item.y + item.h / 2 }, poly)) {
+        ids.push(item.id);
+      }
+    }
+    this.select(ids);
+    this.setTool('select');
   }
 
   toggleCap(which: 'start' | 'end'): void {
@@ -1129,7 +1474,10 @@ export class Editor {
     }
     const item = makeText(this.id(), round2(at.x), round2(at.y));
     item.text = text;
-    item.h = round2(textBlockHeight(text, item.w, item.fontSize ?? 18, 2));
+    // Длинный вставленный текст переносится по разумной ширине, короткий — одной строкой.
+    const one = textBox(text, item.fontSize ?? 18);
+    if (one.w > 640) item.wrap = 480;
+    Object.assign(item, textBox(text, item.fontSize ?? 18, item.wrap));
     this.store.transact('Вставка текста', () => this.store.insert(item));
     this.select([item.id]);
   }
@@ -1216,6 +1564,9 @@ export class Editor {
       case 'KeyO': handled(); this.createShapeAt(this.cursorPoint(), 'ellipse'); break;
       case 'KeyL': handled(); this.setTool('line', { path: 'straight', end: 'arrow' }); break;
       case 'KeyF': handled(); this.setTool('frame'); break;
+      case 'KeyP': handled(); this.setTool('pen'); break;
+      case 'KeyM': handled(); this.setTool('marker'); break;
+      case 'KeyE': handled(); this.setTool('eraser'); break;
       case 'KeyD': handled(); this.onCreateDoc?.(this.cursorPoint()); break;
     }
   }
@@ -1281,6 +1632,17 @@ export class Editor {
     for (const e of this.lineEnds()) g.circle(e.x, e.y, 6).fill(0xffffff).stroke({ width: 2, color: BLUE });
 
     const gs = this.gesture;
+    const z = this.view.cam.zoom;
+    if (gs?.kind === 'draw') {
+      const pts = [...gs.points, ...gs.predicted].map((q) => ({ ...this.view.worldToScreen(q.x, q.y), p: q.p }));
+      drawStroke(g, { tool: gs.tool, color: gs.color, size: gs.size * z }, pts, false);
+    } else if (gs?.kind === 'lasso' && gs.points.length > 1) {
+      const pts = gs.points.map((q) => this.view.worldToScreen(q.x, q.y));
+      g.poly(pts.flatMap((q) => [q.x, q.y]), true).fill({ color: BLUE, alpha: 0.05 }).stroke({ width: 1.5, color: BLUE, alpha: 0.8 });
+    }
+    if ((this.tool === 'eraser' || gs?.kind === 'erase') && this.pointer) {
+      g.circle(this.pointer.sx, this.pointer.sy, 10).stroke({ width: 1.5, color: 0x5b5b5b });
+    }
     if (gs?.kind === 'marquee') {
       const s = this.toScreenRect(rectFromPoints(gs.start, gs.end));
       g.rect(s.x, s.y, s.w, s.h).fill({ color: BLUE, alpha: 0.06 }).stroke({ width: 1, color: BLUE });
