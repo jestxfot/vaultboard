@@ -75,7 +75,8 @@ for (let attempt = 1; ; attempt++) {
     if (exists()) break;
     if (attempt >= 3) throw err;
     console.log(`Создать релиз не вышло (попытка ${attempt}), пробую ещё раз…`);
-    execSync(process.platform === 'win32' ? 'timeout /t 5 >nul' : 'sleep 5', { stdio: 'ignore', shell: true });
+    // Пауза без внешних команд: `timeout` из Windows не работает без интерактивной консоли.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
   }
 }
 console.log(`\n✓ Релиз ${tag} опубликован: https://github.com/jestxfot/vaultboard/releases/tag/${tag}`);

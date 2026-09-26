@@ -110,6 +110,47 @@ function toRelease(r) {
  * Ответ: { changed: false } | { changed: true, release, etag } | { error, retryAt? } (retryAt — когда кончится лимит).
  */
 export async function checkRelease(etag = '', timeoutMs = 6000) {
+  const api = await checkReleaseApi(etag, timeoutMs);
+  // API не ответил или исчерпан лимит — спросим веб-страницу релизов: её лимит не касается.
+  // (Кроме проверок с подменённым адресом релиза — там GitHub не нужен.)
+  if (api.error !== undefined && !process.env.VAULTBOARD_RELEASE_API) {
+    const web = await webLatest(timeoutMs);
+    if (web) return { changed: true, release: web, etag: '' };
+  }
+  return api;
+}
+
+/**
+ * Последний релиз по веб-странице GitHub: /releases/latest перенаправляет на /releases/tag/vX.Y.Z.
+ * Лимит API (60 запросов в час без входа) сюда не относится. Описания релиза здесь нет —
+ * только номер, ссылка и готовая сборка по прямой ссылке.
+ */
+async function webLatest(timeoutMs) {
+  try {
+    const res = await fetch(`https://github.com/${REPO}/releases/latest`, {
+      method: 'HEAD',
+      redirect: 'manual',
+      headers: { 'User-Agent': 'vaultboard-updater' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const where = res.headers.get('location') ?? '';
+    const tag = decodeURIComponent(/\/releases\/tag\/([^/?#]+)/.exec(where)?.[1] ?? '');
+    if (!parseVersion(tag)) return null;
+    return {
+      tag,
+      name: tag,
+      notes: '',
+      url: `https://github.com/${REPO}/releases/tag/${encodeURIComponent(tag)}`,
+      zip: `https://github.com/${REPO}/releases/download/${encodeURIComponent(tag)}/vaultboard.zip`,
+      prebuilt: true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Условный запрос к API GitHub (см. checkRelease). */
+async function checkReleaseApi(etag, timeoutMs) {
   try {
     const headers = { 'User-Agent': 'vaultboard-updater', Accept: 'application/vnd.github+json' };
     if (etag) headers['If-None-Match'] = etag;
