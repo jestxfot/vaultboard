@@ -20,7 +20,7 @@ const EN = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
 const RU = 'йцукенгшщзхъфывапролджэячсмитьбюё';
 
 /** Текст, набранный не в той раскладке: каждая клавиша переводится в букву другой раскладки. */
-function switchLayout(text: string): string {
+export function switchLayout(text: string): string {
   return [...text.toLowerCase()]
     .map((ch) => {
       const r = RU.indexOf(ch);

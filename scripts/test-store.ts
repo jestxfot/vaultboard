@@ -9,6 +9,7 @@ import { recognize } from '../src/editor/recognize.ts';
 import { decodePoints, encodePoints, shiftPoints } from '../src/format/strokes.ts';
 import { snapRect } from '../src/editor/snap.ts';
 import { resolveLook } from '../src/model/look.ts';
+import { searchBoard } from '../src/editor/search.ts';
 
 let failed = 0;
 function check(ok: boolean, message: string): void {
@@ -231,6 +232,23 @@ console.log('\nОбсуждения');
   check(fresh.threads.length === 0 && fresh.items.length === 0, 'по журналу с диска отменяется вся цепочка: ответы, обсуждение, стикер');
   fresh.redo(); fresh.redo();
   check(fresh.thread('t')?.messages.length === 1, 'и повторяется обратно');
+}
+
+console.log('\nПоиск по доске');
+{
+  const items = [
+    { ...makeSticky('b', 0, 0), x: 500, y: 0, text: 'Ещё одна **MCI** заметка' },
+    { ...makeSticky('a', 0, 0), x: 0, y: 10, text: 'Год MCI неизвестен' },
+    { ...makeSticky('c', 0, 0), x: 0, y: 400, text: 'Ёлка у Фредди' },
+    { ...makeSticky('h', 0, 0), x: 0, y: 800, text: 'MCI на скрытом слое', layer: 'hidden' },
+  ];
+  const pos = (id: string) => items.find((i) => i.id === id) ?? null;
+  const visible = (i: { layer?: string }) => i.layer !== 'hidden';
+  const ids = (q: string) => searchBoard(items, q, visible, pos).map((h) => h.id).join(',');
+  check(ids('mci') === 'a,b', `регистр не важен, порядок — сверху вниз, слева направо, скрытый слой не ищется (${ids('mci')})`);
+  check(ids('елка') === 'c', '«ё» и «е» — одна буква');
+  check(ids('ЬСШ') === 'a,b', 'запрос в другой раскладке («ЬСШ» → «MCI»)');
+  check(searchBoard(items, 'mci', visible, pos)[1].label === 'Ещё одна MCI заметка', 'подпись найденного — без значков markdown');
 }
 
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');

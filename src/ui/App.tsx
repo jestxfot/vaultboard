@@ -24,6 +24,8 @@ import { HelpDialog } from './HelpDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
 import { SetupDialog } from './SetupDialog.tsx';
 import { CHECK_UPDATE_EVENT, Updater } from './Updater.tsx';
+import { SearchBar } from './SearchBar.tsx';
+import { searchBoardWith } from '../editor/search.ts';
 import type { Settings, SetupInfo, UpdateStatus } from '../io/vault.ts';
 import { EmbedLayer } from './EmbedLayer.ts';
 import { CommentsLayer } from './CommentsLayer.ts';
@@ -182,6 +184,8 @@ export function App() {
   const [exporting, setExporting] = createSignal<{ area: 'board' | 'selection'; selection: Rect | null } | null>(null);
   const [stylesOpen, setStylesOpen] = createSignal(false);
   const [layersOpen, setLayersOpen] = createSignal(false);
+  /** Строка поиска по доске (Ctrl+F). */
+  const [searchOpen, setSearchOpen] = createSignal(false);
   // Комментарии: открытое обсуждение, новое (точка на доске), список, «скрыть завершённые», имя автора.
   const [openThread, setOpenThread] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal<{ x: number; y: number } | null>(null);
@@ -633,6 +637,7 @@ export function App() {
     pins.onContextMenu = (id, e) => setMenu({ x: e.clientX, y: e.clientY, items: pinMenu(id) });
     ed.onComment = (at) => { closeThread(); setDraft(at); };
     ed.onCommentsPanel = () => setCommentsOpen(!commentsOpen());
+    ed.onSearch = () => setSearchOpen(true);
     ed.onPlayEmbed = (id) => embeds.play(id);
     ed.onLayers = () => setLayersOpen(!layersOpen());
     ed.onContextMenu = (e) => setMenu({ x: e.clientX, y: e.clientY, items: e.target ? objectMenu(e.at) : boardMenu(e.at) });
@@ -1078,6 +1083,15 @@ export function App() {
               flash(`Стиль «${name}» в общей библиотеке базы — его можно добавить на любую доску`);
             }}
             onClose={() => setStylesOpen(false)}
+          />
+        </Show>
+        <Show when={searchOpen() && editor() && ui() && opened}>
+          <SearchBar
+            version={ui()}
+            search={(q) => searchBoardWith(opened!.store.items, q, (i) => !view()!.isHidden(i), (id) => view()!.rectOf(id) ?? null)}
+            onHighlight={(ids, cur) => opened?.editor.setSearchHighlight(ids, cur)}
+            onReveal={(id) => opened?.editor.revealItem(id)}
+            onClose={() => setSearchOpen(false)}
           />
         </Show>
         <Show when={commentsOpen() && editor() && ui() && opened}>

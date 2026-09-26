@@ -185,6 +185,11 @@ export class Editor {
   onComment: ((at: Point) => void) | null = null;
   /** Открыть или закрыть список комментариев (Shift+C). */
   onCommentsPanel: (() => void) | null = null;
+  /** Открыть поиск по доске (Ctrl+F). */
+  onSearch: (() => void) | null = null;
+  /** Найденное поиском — подсвечивается; текущее — ярче. */
+  private searchHits = new Set<string>();
+  private searchCurrent: string | null = null;
   /** Вставили адрес страницы — приложение разворачивает его в карточку и зовёт applyUnfurl. */
   onUnfurl: ((id: string, url: string) => void) | null = null;
   /** Щелчок правой кнопкой: меню по объекту (target) или по доске (target = null). */
@@ -1787,6 +1792,27 @@ export class Editor {
     this.select([id]);
   }
 
+  /** Подсветить найденное поиском (пустой список — убрать подсветку). */
+  setSearchHighlight(ids: string[], current: string | null): void {
+    this.searchHits = new Set(ids);
+    this.searchCurrent = current;
+    this.view.invalidateOverlay();
+  }
+
+  /**
+   * Показать объект, не прыгая масштабом: помещается на экране — просто подвести его в центр;
+   * слишком мелкий или крупный — подобрать масштаб, чтобы было видно.
+   */
+  revealItem(id: string): void {
+    const r = this.view.rectOf(id);
+    if (!r) return;
+    const { w, h } = this.view.screen;
+    let zoom = this.view.cam.zoom;
+    const onScreen = Math.max(r.w, r.h) * zoom;
+    if (onScreen < 24 || r.w * zoom > w * 0.8 || r.h * zoom > h * 0.8) zoom = Math.min(1, Math.min((w * 0.5) / r.w, (h * 0.5) / r.h));
+    this.view.setCamera({ zoom, x: w / 2 - (r.x + r.w / 2) * zoom, y: h / 2 - (r.y + r.h / 2) * zoom });
+  }
+
   /** Выделить объект и показать его на экране. */
   focusItem(id: string): void {
     const r = this.view.rectOf(id);
@@ -2135,6 +2161,7 @@ export class Editor {
       else if (code === 'KeyA') { handled(); this.selectAll(); }
       else if (code === 'KeyD') { handled(); this.duplicate(); }
       else if (code === 'KeyK') { handled(); this.onQuickOpen?.(); }
+      else if (code === 'KeyF') { handled(); this.onSearch?.(); }
       else if (code === 'KeyB' && this.selection.size) { handled(); this.toggleFormat('bold'); }
       else if (code === 'KeyI' && this.selection.size) { handled(); this.toggleFormat('italic'); }
       else if (code === 'BracketRight') { handled(); this.bringToFront(); }
@@ -2278,6 +2305,16 @@ export class Editor {
     }
     for (const e of this.lineEnds()) g.circle(e.x, e.y, 6).fill(0xffffff).stroke({ width: 2, color: BLUE });
 
+    // Найденное поиском: жёлтая рамка, текущее — оранжевая и с заливкой.
+    for (const id of this.searchHits) {
+      const r = this.view.rectOf(id);
+      if (!r) continue;
+      const s = this.toScreenRect(r);
+      const cur = id === this.searchCurrent;
+      g.roundRect(s.x - 4, s.y - 4, s.w + 8, s.h + 8, 5)
+        .fill({ color: cur ? 0xff9f1a : 0xffd84a, alpha: cur ? 0.16 : 0.08 })
+        .stroke({ width: cur ? 3 : 2, color: cur ? 0xff9f1a : 0xf5c518, alpha: 0.95 });
+    }
     // Центр доски 0, 0 — неброский крестик, чтобы было от чего считать координаты.
     const o = this.view.worldToScreen(0, 0);
     const { w: sw, h: sh } = this.view.screen;
