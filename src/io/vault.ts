@@ -90,6 +90,16 @@ export const vault = {
     await fetch(vault.previewUrl(path, level), { method: 'PUT', body: data }).catch(() => undefined);
   },
 
+  /** Общая библиотека стилей базы (`.vaultboard/стили.json`). */
+  async getLibrary(): Promise<Record<string, import('../model/types.ts').StyleDef>> {
+    const res = await fetch('/api/library');
+    return res.ok ? res.json() : {};
+  },
+
+  async putLibrary(styles: Record<string, import('../model/types.ts').StyleDef>): Promise<void> {
+    await fetch('/api/library', { method: 'PUT', body: JSON.stringify(styles, null, 1) });
+  },
+
   resolve: (from: string, refs: string[]) =>
     request<Record<string, string | null>>('/api/resolve', {
       method: 'POST',

@@ -8,7 +8,8 @@
 // Горячие клавиши работают по физическим клавишам (e.code), поэтому одинаково в русской и английской раскладке.
 import type { Graphics } from 'pixi.js';
 import type { BoardStore, Op } from '../model/store.ts';
-import type { BoxItem, DashKind, DrawingItem, EndCap, Endpoint, FrameItem, Item, LineItem, PathKind, ShapeKind, Side, Stroke, TextItem } from '../model/types.ts';
+import type { BoxItem, DashKind, DrawingItem, EndCap, Endpoint, FrameItem, Item, LineItem, Look, PathKind, ShapeKind, Side, Stroke, StyleDef, TextItem } from '../model/types.ts';
+import { lookOf, withoutStyleFields } from '../model/look.ts';
 import { isLine } from '../model/types.ts';
 import { makeFrame, makeLine, makeShape, makeSticky, makeText, newId, shapeSize, STICKY_SIZE } from '../model/factory.ts';
 import { DEFAULT_STICKY } from '../format/colors.ts';
@@ -18,6 +19,7 @@ import { type Anchor, geomBounds, lineGeometry, lineMidpoint, type Point, type R
 import { drawStroke, textBox } from '../render/draw.ts';
 import { decodePoints, encodePoints, shiftPoints, type StrokePoint } from '../format/strokes.ts';
 import { recognize } from './recognize.ts';
+import { type Guide, snapRect, type XEdge, type YEdge } from './snap.ts';
 import { distToLine, distToSegment, geomPoints, inRect, rectContains, rectFromPoints, rectsIntersect, round2, unionRect } from './hit.ts';
 import { type CloseReason, type EditField, TextEditor } from './TextEditor.ts';
 
@@ -92,9 +94,9 @@ interface PointerState {
 }
 
 type Gesture =
-  | { kind: 'pan'; lastX: number; lastY: number; moved: boolean; clearOnClick: boolean; downX: number; downY: number }
+  | { kind: 'pan'; lastX: number; lastY: number; moved: boolean; clearOnClick: boolean; downX: number; downY: number; menu: boolean; clientX: number; clientY: number }
   | { kind: 'press'; id: string; downX: number; downY: number; start: Point; toggleOff: boolean; alt: boolean }
-  | { kind: 'move'; start: Point; boxes: Map<string, Point>; lines: Map<string, LineItem> }
+  | { kind: 'move'; start: Point; boxes: Map<string, Point>; lines: Map<string, LineItem>; base: Rect | null }
   | { kind: 'marquee'; start: Point; end: Point; base: Set<string> }
   | { kind: 'resize'; handle: Handle; start: Rect; boxes: Map<string, BoxItem>; aspect: boolean }
   | { kind: 'create'; tool: Tool; start: Point; end: Point }
@@ -165,6 +167,8 @@ export class Editor {
   onCreateDoc: ((at: Point) => void) | null = null;
   /** Ctrl+K — поиск заметки по базе. */
   onQuickOpen: (() => void) | null = null;
+  /** Щелчок правой кнопкой: меню по объекту (target) или по доске (target = null). */
+  onContextMenu: ((e: { clientX: number; clientY: number; at: Point; target: string | null }) => void) | null = null;
 
   private readonly store: BoardStore;
   private readonly view: BoardView;
@@ -176,6 +180,8 @@ export class Editor {
   private pointerDirty = false;
   private hover: string | null = null;
   private spaceDown = false;
+  /** Направляющие привязки, которые сейчас видны (во время перетаскивания или изменения размера). */
+  private guides: Guide[] = [];
   /** Последний рисунок: штрихи, нарисованные подряд и рядом, добавляются в него, а не плодят объекты. */
   private lastDrawing: { id: string; time: number } | null = null;
   private readonly cleanup: (() => void)[] = [];
@@ -234,7 +240,7 @@ export class Editor {
   storeChanged(ops: Op[]): void {
     for (const op of ops) {
       if (op.t === 'delete' && !this.store.has(op.item.id)) this.selection.delete(op.item.id);
-      if (op.t === 'replace' && op.after.id === this.text.activeId && !isLine(op.after)) this.text.update(op.after);
+      if (op.t === 'replace' && op.after.id === this.text.activeId && !isLine(op.after)) this.text.update(this.view.look(op.after));
     }
     if (this.hover && !this.store.has(this.hover)) this.hover = null;
     this.changed();
@@ -341,6 +347,8 @@ export class Editor {
 
     if (e.button === 1 || e.button === 2 || this.spaceDown) {
       this.startPan(p, false);
+      // Правая кнопка без движения — меню, с движением — двигаем доску.
+      if (e.button === 2 && this.gesture?.kind === 'pan') Object.assign(this.gesture, { menu: true, clientX: e.clientX, clientY: e.clientY });
       return;
     }
     if (e.button !== 0 && !(e.pointerType === 'pen' && e.buttons & 32)) return;
@@ -428,7 +436,7 @@ export class Editor {
   }
 
   private startPan(p: PointerState, clearOnClick: boolean): void {
-    this.gesture = { kind: 'pan', lastX: p.sx, lastY: p.sy, moved: false, clearOnClick, downX: p.sx, downY: p.sy };
+    this.gesture = { kind: 'pan', lastX: p.sx, lastY: p.sy, moved: false, clearOnClick, downX: p.sx, downY: p.sy, menu: false, clientX: 0, clientY: 0 };
     this.host.style.cursor = 'grabbing';
   }
 
@@ -481,11 +489,11 @@ export class Editor {
         if (Math.hypot(p.sx - g.downX, p.sy - g.downY) < DRAG_THRESHOLD) break;
         if (g.toggleOff) break;
         this.startMove(g.start, g.alt);
-        this.processMove(w, p.shift);
+        this.processMove(w, p.shift, p.ctrl);
         break;
       }
       case 'move':
-        this.processMove(w, p.shift);
+        this.processMove(w, p.shift, p.ctrl);
         break;
       case 'marquee': {
         g.end = w;
@@ -503,7 +511,7 @@ export class Editor {
         break;
       }
       case 'resize':
-        this.processResize(w, p.shift);
+        this.processResize(w, p.shift, p.ctrl);
         break;
       case 'create':
         g.end = w;
@@ -545,6 +553,7 @@ export class Editor {
     this.processPointer();
     const g = this.gesture;
     this.gesture = null;
+    this.guides = [];
     this.host.style.cursor = this.tool === 'select' ? (this.spaceDown ? 'grab' : '') : 'crosshair';
     if (!g) return;
     if (g.kind === 'draw') g.predicted = [];
@@ -554,6 +563,13 @@ export class Editor {
     switch (g.kind) {
       case 'pan':
         if (!g.moved && g.clearOnClick && !p.shift) this.select([]);
+        if (!g.moved && g.menu) {
+          // Меню по объекту: если щёлкнули не по выделенному — выделяем его, как в Miro.
+          const hit = this.hitTest(w);
+          if (hit && !this.selection.has(hit)) this.select([hit]);
+          if (!hit && this.selection.size) this.select([]);
+          this.onContextMenu?.({ clientX: g.clientX, clientY: g.clientY, at: w, target: hit });
+        }
         break;
       case 'press':
         if (g.toggleOff) {
@@ -641,7 +657,8 @@ export class Editor {
     return [...this.selection].map((id) => this.store.get(id)).filter(isBox);
   }
 
-  private selectionWorldRect(): Rect | null {
+  /** Рамка выделенного на доске (для экспорта выделенного). */
+  selectionWorldRect(): Rect | null {
     const rects: Rect[] = this.selectedBoxes();
     for (const id of this.selection) {
       const item = this.store.get(id);
@@ -777,16 +794,37 @@ export class Editor {
         if (!lines.has(lineId)) lines.set(lineId, l);
       }
     }
-    this.gesture = { kind: 'move', start, boxes, lines };
+    const base = unionRect([...boxes.keys()].map((id) => this.view.rectOf(id)).filter((r): r is Rect => !!r));
+    this.gesture = { kind: 'move', start, boxes, lines, base };
   }
 
-  private processMove(w: Point, axisLock: boolean): void {
+  /** Соседи для привязки: объекты рядом, кроме перетаскиваемых и линий. */
+  private snapTargets(area: Rect, exclude: Set<string>): Rect[] {
+    const reach = 600 / this.view.cam.zoom;
+    const around = { x: area.x - reach, y: area.y - reach, w: area.w + reach * 2, h: area.h + reach * 2 };
+    return this.view
+      .search(around)
+      .filter((i) => !isLine(i) && !exclude.has(i.id) && i.kind !== 'drawing')
+      .map((i) => this.view.rectOf(i.id)!)
+      .filter(Boolean);
+  }
+
+  private processMove(w: Point, axisLock: boolean, noSnap = false): void {
     const g = this.gesture;
     if (g?.kind !== 'move') return;
     let dx = w.x - g.start.x, dy = w.y - g.start.y;
     if (axisLock) {
       if (Math.abs(dx) > Math.abs(dy)) dy = 0;
       else dx = 0;
+    }
+    // Привязка к соседям и сетке; Ctrl — без привязки.
+    this.guides = [];
+    if (g.base && !noSnap) {
+      const moved = { x: g.base.x + dx, y: g.base.y + dy, w: g.base.w, h: g.base.h };
+      const snap = snapRect(moved, this.snapTargets(moved, new Set(g.boxes.keys())), 6 / this.view.cam.zoom, 8, ['l', 'c', 'r'], ['t', 'm', 'b']);
+      if (!(axisLock && dx === 0)) dx += snap.dx;
+      if (!(axisLock && dy === 0)) dy += snap.dy;
+      this.guides = snap.guides;
     }
     const shift = (ep: Endpoint, orig: Endpoint): Endpoint => ('item' in orig ? ep : { x: round2(orig.x + dx), y: round2(orig.y + dy) });
     this.store.live(() => {
@@ -801,7 +839,7 @@ export class Editor {
   }
 
   private startResize(handle: Handle, shift: boolean): void {
-    const boxes = new Map(this.selectedBoxes().filter((b) => !b.locked).map((b) => [b.id, b]));
+    const boxes = new Map(this.selectedBoxes().filter((b) => !b.locked).map((b) => [b.id, this.view.look(b)]));
     const start = unionRect([...boxes.values()]);
     if (!start) return;
     // Фото и текст за угол меняются пропорционально: текст при этом увеличивается целиком, вместе со шрифтом.
@@ -810,7 +848,7 @@ export class Editor {
     this.gesture = { kind: 'resize', handle, start, boxes, aspect };
   }
 
-  private processResize(w: Point, shift: boolean): void {
+  private processResize(w: Point, shift: boolean, noSnap = false): void {
     const g = this.gesture;
     if (g?.kind !== 'resize') return;
     const s = g.start;
@@ -819,6 +857,19 @@ export class Editor {
     if (g.handle.includes('e')) x1 = Math.max(w.x, x0 + 10);
     if (g.handle.includes('n')) y0 = Math.min(w.y, y1 - 10);
     if (g.handle.includes('s')) y1 = Math.max(w.y, y0 + 10);
+    // Привязка того края, который тянут, к краям соседей и сетке.
+    this.guides = [];
+    if (!noSnap) {
+      const xs: XEdge[] = g.handle.includes('w') ? ['l'] : g.handle.includes('e') ? ['r'] : [];
+      const ys: YEdge[] = g.handle.includes('n') ? ['t'] : g.handle.includes('s') ? ['b'] : [];
+      const r = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+      const snap = snapRect(r, this.snapTargets(r, new Set(g.boxes.keys())), 6 / this.view.cam.zoom, 8, xs, ys);
+      if (xs[0] === 'l') x0 += snap.dx;
+      if (xs[0] === 'r') x1 += snap.dx;
+      if (ys[0] === 't') y0 += snap.dy;
+      if (ys[0] === 'b') y1 += snap.dy;
+      this.guides = snap.guides;
+    }
     let sx = (x1 - x0) / s.w, sy = (y1 - y0) / s.h;
     const corner = g.handle.length === 2;
     if ((g.aspect || shift) && corner) {
@@ -839,10 +890,10 @@ export class Editor {
         };
         if (o.kind === 'text') {
           // Свободный текст: за угол увеличивается сам текст (шрифт), за бок — ширина строки. Рамка — по тексту.
-          const t = o as TextItem;
+          const t = this.view.look(o as TextItem);
           const fontSize = corner ? round2(Math.max(6, (t.fontSize ?? 18) * sx)) : (t.fontSize ?? 18);
           const wrap = corner ? (t.wrap ? round2(t.wrap * sx) : undefined) : round2(Math.max(fontSize * 2, patch.w!));
-          const box = textBox(t.text, fontSize, wrap);
+          const box = textBox(t.text, fontSize, wrap, t.font);
           Object.assign(patch, { fontSize, w: box.w, h: box.h });
           if (wrap) (patch as Partial<TextItem>).wrap = wrap;
           // Ручка слева или сверху: правый/нижний край стоит на месте.
@@ -962,7 +1013,7 @@ export class Editor {
     if (!isBox(item)) return;
     const value = field === 'title' ? ((item as FrameItem).title ?? '') : ((item as { text?: string }).text ?? '');
     this.view.setEditing(id);
-    this.text.open(item, field, value);
+    this.text.open(this.view.look(item), field, value);
     this.changed();
   }
 
@@ -983,7 +1034,10 @@ export class Editor {
         if (field === 'title') return { ...item, title: value } as BoxItem;
         const next = { ...item, text: value } as BoxItem;
         // Рамка свободного текста всегда ровно по тексту.
-        if (item.kind === 'text') Object.assign(next, textBox(value, item.fontSize ?? 18, item.wrap));
+        if (item.kind === 'text') {
+          const look = this.view.look(item);
+          Object.assign(next, textBox(value, look.fontSize ?? 18, item.wrap, look.font));
+        }
         return next;
       }),
     );
@@ -1047,6 +1101,184 @@ export class Editor {
     this.store.transact('Вид линии', () => {
       for (const id of this.selection) if (isLine(this.store.get(id)!)) this.store.update<LineItem>(id, { path });
     });
+  }
+
+  // ---------- оформление ----------
+
+  /** Оформление первого выделенного объекта (со стилем) — чтобы панель показала текущие значения. */
+  selectedLook(): (Look & { width?: number; kind: string; style?: string; hasStyle: boolean }) | null {
+    const id = [...this.selection][0];
+    const item = id ? this.store.get(id) : undefined;
+    if (!item) return null;
+    const look = this.view.look(item) as unknown as Look & { width?: number };
+    return { ...look, kind: item.kind, style: item.style, hasStyle: !!item.style && !!this.styles()[item.style] };
+  }
+
+  /**
+   * Поменять оформление выделенного: шрифт, размер, цвета, границу. `undefined` — вернуть «как по умолчанию».
+   * Свободный текст после смены шрифта или размера подгоняет рамку под себя.
+   */
+  setLook(change: Partial<Look>): void {
+    this.store.transact('Оформление', () => {
+      for (const id of this.selection) {
+        this.store.update(id, (item) => {
+          if (isLine(item)) return item;
+          const next = { ...item } as unknown as Record<string, unknown>;
+          for (const [k, v] of Object.entries(change)) {
+            if (v === undefined) delete next[k];
+            else next[k] = v;
+          }
+          const box = next as unknown as BoxItem;
+          if (box.kind === 'text') {
+            const look = this.view.look(box);
+            Object.assign(box, textBox(box.text, look.fontSize ?? 18, box.wrap, look.font));
+          }
+          return box;
+        });
+      }
+    });
+    this.changed();
+  }
+
+  /** Жирный или курсив: при наборе — для выделенного куска текста, иначе — для всего объекта. */
+  toggleFormat(kind: 'bold' | 'italic'): void {
+    if (this.text.activeId) {
+      this.text.wrapSelection(kind === 'bold' ? '**' : '*');
+      return;
+    }
+    const look = this.selectedLook();
+    this.setLook({ [kind]: look?.[kind] ? undefined : true });
+  }
+
+  // ---------- стили доски ----------
+
+  styles(): Record<string, StyleDef> {
+    return this.store.doc.styles ?? {};
+  }
+
+  /** Сохранить оформление выделенного объекта как стиль с этим именем и сразу применить его. */
+  saveStyle(name: string): void {
+    const id = [...this.selection][0];
+    const item = id ? this.store.get(id) : undefined;
+    if (!item || !name.trim()) return;
+    const def = lookOf(this.view.look(item));
+    this.store.transact('Новый стиль', () => {
+      this.store.setProp('styles', { ...this.styles(), [name.trim()]: def });
+      for (const sid of this.selection) this.applyStyleTo(sid, name.trim(), def);
+    });
+    this.changed();
+  }
+
+  private applyStyleTo(id: string, name: string, def: StyleDef): void {
+    this.store.update(id, (item) => {
+      const next = withoutStyleFields({ ...item, style: name }, def);
+      if (next.kind === 'text') {
+        const look = { ...def, ...next } as TextItem;
+        Object.assign(next, textBox(next.text, look.fontSize ?? 18, next.wrap, look.font));
+      }
+      return next;
+    });
+  }
+
+  /** Применить стиль к выделенному (null — убрать стиль, оставив вид как есть). */
+  applyStyle(name: string | null): void {
+    const styles = this.styles();
+    this.store.transact(name ? `Стиль «${name}»` : 'Без стиля', () => {
+      for (const id of this.selection) {
+        if (name && styles[name]) this.applyStyleTo(id, name, styles[name]);
+        else {
+          const item = this.store.get(id);
+          if (!item?.style) continue;
+          // Без стиля объект сохраняет свой вид: оформление стиля переписывается в сам объект.
+          const baked = { ...this.view.look(item) } as Item & { style?: string };
+          delete baked.style;
+          this.store.update(id, () => baked);
+        }
+      }
+    });
+    this.changed();
+  }
+
+  /** Сбросить отличия от стиля: объект снова выглядит ровно как его стиль. */
+  resetToStyle(): void {
+    const styles = this.styles();
+    this.store.transact('Сбросить к стилю', () => {
+      for (const id of this.selection) {
+        const item = this.store.get(id);
+        const def = item?.style ? styles[item.style] : undefined;
+        if (item && def) this.applyStyleTo(id, item.style!, def);
+      }
+    });
+  }
+
+  /** «Изменил объект — обновить по нему стиль»: все объекты с этим стилем станут такими же. */
+  updateStyleFromSelection(): void {
+    const id = [...this.selection][0];
+    const item = id ? this.store.get(id) : undefined;
+    if (!item?.style) return;
+    const def = lookOf(this.view.look(item));
+    this.store.transact(`Обновить стиль «${item.style}»`, () => {
+      this.store.setProp('styles', { ...this.styles(), [item.style!]: def });
+      this.applyStyleTo(item.id, item.style!, def);
+    });
+    this.changed();
+  }
+
+  styleNames(): string[] {
+    return Object.keys(this.styles());
+  }
+
+  styleUsage(name: string): number {
+    return this.store.items.reduce((n, i) => n + (i.style === name ? 1 : 0), 0);
+  }
+
+  selectByStyle(name: string): void {
+    this.select(this.store.items.filter((i) => i.style === name).map((i) => i.id));
+  }
+
+  /** Массовая замена: у всех объектов стиль «from» → «to». */
+  replaceStyle(from: string, to: string): void {
+    const def = this.styles()[to];
+    if (!def) return;
+    this.store.transact(`Заменить «${from}» на «${to}»`, () => {
+      for (const item of this.store.items) if (item.style === from) this.applyStyleTo(item.id, to, def);
+    });
+  }
+
+  renameStyle(from: string, to: string): void {
+    const styles = this.styles();
+    const name = to.trim();
+    if (!styles[from] || !name || styles[name]) return;
+    const next: Record<string, StyleDef> = {};
+    for (const [k, v] of Object.entries(styles)) next[k === from ? name : k] = v;
+    this.store.transact('Переименовать стиль', () => {
+      this.store.setProp('styles', next);
+      for (const item of this.store.items) if (item.style === from) this.store.update(item.id, { style: name });
+    });
+    this.changed();
+  }
+
+  /** Удалить стиль: объекты с ним сохраняют свой вид, просто без стиля. */
+  deleteStyle(name: string): void {
+    const styles = { ...this.styles() };
+    if (!styles[name]) return;
+    this.store.transact(`Удалить стиль «${name}»`, () => {
+      for (const item of this.store.items) {
+        if (item.style !== name) continue;
+        const baked = { ...this.view.look(item) } as Item & { style?: string };
+        delete baked.style;
+        this.store.update(item.id, () => baked);
+      }
+      delete styles[name];
+      this.store.setProp('styles', Object.keys(styles).length ? styles : undefined);
+    });
+    this.changed();
+  }
+
+  /** Добавить стиль из общей библиотеки базы на эту доску. */
+  addStyle(name: string, def: StyleDef): void {
+    this.store.transact('Стиль из библиотеки', () => this.store.setProp('styles', { ...this.styles(), [name]: def }));
+    this.changed();
   }
 
   setLineWidth(width: number): void {
@@ -1411,6 +1643,54 @@ export class Editor {
     return hasText(item) ? { id: item.id, text: item.text ?? '' } : null;
   }
 
+  selectIds(ids: string[]): void {
+    this.select(ids);
+  }
+
+  selectAll(): void {
+    this.select(this.store.items.map((i) => i.id));
+  }
+
+  /** Замок: закреплённый объект не двигается и не меняет размер, пока его не открепят. */
+  toggleLock(): void {
+    const items = [...this.selection].map((id) => this.store.get(id)).filter((i): i is Item => !!i);
+    const lock = !items.every((i) => i.locked);
+    this.store.transact(lock ? 'Закрепить' : 'Открепить', () => {
+      for (const i of items) {
+        this.store.update(i.id, (item) => {
+          const next = { ...item };
+          if (lock) next.locked = true;
+          else delete next.locked;
+          return next;
+        });
+      }
+    });
+    this.changed();
+  }
+
+  /** Копировать / вырезать из меню: браузер вызовет то же событие, что и Ctrl+C / Ctrl+X. */
+  clipboardCommand(cmd: 'copy' | 'cut'): void {
+    document.execCommand(cmd);
+  }
+
+  /** Вставить из меню — из системного буфера (браузер может спросить разрешение). */
+  async pasteAt(at: Point): Promise<void> {
+    try {
+      const items = await navigator.clipboard.read();
+      const files: File[] = [];
+      let text = '';
+      for (const it of items) {
+        const image = it.types.find((t) => t.startsWith('image/'));
+        if (image) files.push(new File([await it.getType(image)], `image.${image.split('/')[1]}`, { type: image }));
+        else if (it.types.includes('text/plain')) text = await (await it.getType('text/plain')).text();
+      }
+      if (files.length) this.onFiles?.(files, at);
+      else if (text) this.pasteText(text, at);
+    } catch {
+      this.onNotice?.('Браузер не дал прочитать буфер — вставь через Ctrl+V');
+    }
+  }
+
   /** Середина экрана в координатах доски. */
   viewCenter(): Point {
     const { w, h } = this.view.screen;
@@ -1456,7 +1736,11 @@ export class Editor {
     const text = data.getData('text/plain');
     if (!text) return;
     e.preventDefault();
-    const at = this.cursorPoint();
+    this.pasteText(text, this.cursorPoint());
+  }
+
+  /** Вставить текст: наш буфер (объекты доски) — копиями, обычный текст — свободным текстом. */
+  pasteText(text: string, at: Point): void {
     try {
       const clip = JSON.parse(text) as { items?: Item[] } & Record<string, unknown>;
       if (clip[CLIP_MARK] && Array.isArray(clip.items) && clip.items.length) {
@@ -1512,13 +1796,23 @@ export class Editor {
       else if (code === 'KeyA') { handled(); this.select(this.store.items.map((i) => i.id)); }
       else if (code === 'KeyD') { handled(); this.duplicate(); }
       else if (code === 'KeyK') { handled(); this.onQuickOpen?.(); }
+      else if (code === 'KeyB' && this.selection.size) { handled(); this.toggleFormat('bold'); }
+      else if (code === 'KeyI' && this.selection.size) { handled(); this.toggleFormat('italic'); }
       else if (code === 'BracketRight') { handled(); this.bringToFront(); }
       else if (code === 'BracketLeft') { handled(); this.sendToBack(); }
       else if (code === 'Equal' || code === 'NumpadAdd') { handled(); this.zoomCenter(1.25); }
       else if (code === 'Minus' || code === 'NumpadSubtract') { handled(); this.zoomCenter(0.8); }
       return;
     }
-    if (e.altKey) return;
+    if (e.altKey) {
+      const n = /^Digit([1-9])$/.exec(code);
+      const name = n ? Object.keys(this.styles())[Number(n[1]) - 1] : undefined;
+      if (name && this.selection.size) {
+        handled();
+        this.applyStyle(name);
+      }
+      return;
+    }
 
     if (e.shiftKey && code === 'Digit1') { handled(); this.view.fitAll(); return; }
     if (e.shiftKey && code === 'Digit2') {
@@ -1631,6 +1925,10 @@ export class Editor {
     }
     for (const e of this.lineEnds()) g.circle(e.x, e.y, 6).fill(0xffffff).stroke({ width: 2, color: BLUE });
 
+    for (const gd of this.guides) {
+      const a = this.view.worldToScreen(gd.x1, gd.y1), b = this.view.worldToScreen(gd.x2, gd.y2);
+      g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ width: 1, color: 0xff3d8b });
+    }
     const gs = this.gesture;
     const z = this.view.cam.zoom;
     if (gs?.kind === 'draw') {

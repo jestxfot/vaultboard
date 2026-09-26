@@ -77,6 +77,15 @@ export class ImageCache {
     return null;
   }
 
+  /** Готов ли уровень фото (для экспорта: дождаться оригиналов перед снимком). */
+  status(file: string, level: Level): 'ready' | 'loading' | 'failed' | 'none' {
+    const slot = this.entries.get(file)?.slots[level];
+    if (!slot) return 'none';
+    if (slot.tex) return 'ready';
+    if (slot.failed) return 'failed';
+    return slot.loading ? 'loading' : 'none';
+  }
+
   request(file: string, level: Level): void {
     const e = this.entry(file);
     const slot = e.slots[level];

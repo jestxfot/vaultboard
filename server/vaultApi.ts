@@ -265,6 +265,27 @@ export function vaultApi(root: string): Plugin {
       }
     }
 
+    if (url.pathname === '/library') {
+      // Общая библиотека стилей базы — чтобы переносить удачные стили между досками.
+      const abs = toAbsolute(absRoot, '.vaultboard/стили.json');
+      if (req.method === 'GET') {
+        const text = await fs.readFile(abs, 'utf8').catch(() => '{}');
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.end(text);
+        return;
+      }
+      if (req.method === 'PUT') {
+        const body = await readBody(req);
+        JSON.parse(body);
+        await fs.mkdir(path.dirname(abs), { recursive: true });
+        const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`;
+        await fs.writeFile(tmp, body, 'utf8');
+        await fs.rename(tmp, abs);
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
     if (req.method === 'POST' && url.pathname === '/resolve') {
       const body = JSON.parse(await readBody(req)) as { from: string; refs: string[] };
       return sendJson(res, 200, await resolveRefs(absRoot, body.from, body.refs));

@@ -39,6 +39,10 @@ export class TextEditor {
     });
     this.area.addEventListener('keydown', (e) => {
       e.stopPropagation();
+      // Оформление выделенного куска текста — прямо markdown-разметкой, как в Obsidian.
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyB') return this.wrapKey(e, '**');
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyI') return this.wrapKey(e, '*');
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyH') return this.wrapKey(e, '==');
       if (e.key === 'Escape') this.finish('escape', e);
       else if (e.key === 'Tab' && this.field === 'text') this.finish('tab', e);
       else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) this.finish('ctrlEnter', e);
@@ -82,6 +86,27 @@ export class TextEditor {
     this.item = null;
     this.wrap.style.display = 'none';
     this.cb.onClose(reason);
+  }
+
+  /** Обернуть выделенный текст разметкой (или снять её, если она уже есть). */
+  wrapSelection(mark: string): void {
+    const a = this.area;
+    const { selectionStart: s, selectionEnd: e, value } = a;
+    const before = value.slice(0, s), sel = value.slice(s, e), after = value.slice(e);
+    if (before.endsWith(mark) && after.startsWith(mark)) {
+      a.value = before.slice(0, -mark.length) + sel + after.slice(mark.length);
+      a.setSelectionRange(s - mark.length, e - mark.length);
+    } else {
+      a.value = before + mark + sel + mark + after;
+      a.setSelectionRange(s + mark.length, e + mark.length);
+    }
+    this.autosize();
+    this.cb.onInput(a.value);
+  }
+
+  private wrapKey(e: KeyboardEvent, mark: string): void {
+    e.preventDefault();
+    this.wrapSelection(mark);
   }
 
   destroy(): void {
@@ -131,12 +156,13 @@ export class TextEditor {
     if (!spec) return;
     const size = fitFontSize(spec, item.w, item.h);
     Object.assign(a, {
-      fontFamily: FONT,
+      fontFamily: spec.fontFamily,
       fontSize: `${size}px`,
       lineHeight: `${lineHeightOf(size)}px`,
       padding: `${spec.pad}px`,
       textAlign: spec.align,
-      fontWeight: spec.bold ? '600' : '400',
+      fontWeight: spec.bold ? '700' : '400',
+      fontStyle: spec.italic ? 'italic' : 'normal',
       color: `#${spec.color.toString(16).padStart(6, '0')}`,
     });
     this.wrap.style.alignItems = spec.vcenter ? 'center' : 'flex-start';

@@ -7,6 +7,8 @@ import { makeLine, makeSticky } from '../src/model/factory.ts';
 import type { StickyItem } from '../src/model/types.ts';
 import { recognize } from '../src/editor/recognize.ts';
 import { decodePoints, encodePoints, shiftPoints } from '../src/format/strokes.ts';
+import { snapRect } from '../src/editor/snap.ts';
+import { resolveLook } from '../src/model/look.ts';
 
 let failed = 0;
 function check(ok: boolean, message: string): void {
@@ -163,6 +165,21 @@ console.log('\nРисование');
   check(json * 3 < raw, `сжатый штрих занимает ${json} байт вместо ${raw}`);
   const shifted = decodePoints(shiftPoints(packed, 10, -5));
   check(Math.abs(shifted[199].x - back[199].x - 10) < 0.06 && Math.abs(shifted[199].y - back[199].y + 5) < 0.06, 'сдвиг рисунка меняет одну точку, а двигает весь штрих');
+}
+
+console.log('\nПривязка и стили');
+{
+  const other = { x: 300, y: 100, w: 200, h: 100 };
+  const a = snapRect({ x: 97, y: 257, w: 200, h: 100 }, [other], 6, 8, ['l', 'c', 'r'], ['t', 'm', 'b']);
+  check(a.dx === 3 && a.guides.length >= 1, `правый край прилип к левому краю соседа (сдвиг ${a.dx}) и есть направляющая`);
+  const b = snapRect({ x: 403, y: 250, w: 100, h: 50 }, [other], 6, 8, ['l', 'c', 'r'], ['t', 'm', 'b']);
+  check(b.dx === -3, `центры встали на одну вертикаль (сдвиг ${b.dx})`);
+  const c = snapRect({ x: 1003, y: 2005, w: 50, h: 50 }, [other], 6, 8, ['l', 'c', 'r'], ['t', 'm', 'b']);
+  check(c.dx === -3 && c.dy === 3 && c.guides.length === 0, 'соседей рядом нет — объект прилипает к сетке 8');
+  const styles = { Факт: { color: '#ff0000', fontSize: 30, bold: true } };
+  const item: StickyItem = { id: 's', kind: 'sticky', x: 0, y: 0, w: 1, h: 1, text: '', style: 'Факт', fontSize: 12 };
+  const r = resolveLook(item, styles);
+  check(r.color === '#ff0000' && r.bold === true && r.fontSize === 12, 'стиль подставляется снизу, своё поле объекта главнее стиля');
 }
 
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');

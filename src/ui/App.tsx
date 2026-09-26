@@ -16,6 +16,28 @@ import { ContextBar } from './ContextBar.tsx';
 import { ImageViewer } from './ImageViewer.tsx';
 import { DocPanel, type DocMode } from './DocPanel.tsx';
 import { QuickOpen } from './QuickOpen.tsx';
+import { ContextMenu, type MenuEntry } from './ContextMenu.tsx';
+import { ExportDialog } from './ExportDialog.tsx';
+import { StylesPanel } from './StylesPanel.tsx';
+import { HelpDialog } from './HelpDialog.tsx';
+import { exportBoard, type ExportFormat, saveBlob } from '../render/export.ts';
+import type { Background, GridKind, StyleDef } from '../model/types.ts';
+import type { Rect } from '../render/geometry.ts';
+
+const BACKGROUNDS: { color: string; name: string }[] = [
+  { color: '#f7f7f5', name: 'Светлый' },
+  { color: '#ffffff', name: 'Белый' },
+  { color: '#eef2f7', name: 'Голубоватый' },
+  { color: '#f5efe6', name: 'Бумага' },
+  { color: '#eef5ee', name: 'Мятный' },
+  { color: '#2b2b2b', name: 'Тёмный' },
+  { color: '#1e2230', name: 'Ночной' },
+];
+const GRIDS: { grid: GridKind; name: string }[] = [
+  { grid: 'dots', name: 'Точки' },
+  { grid: 'lines', name: 'Клетка' },
+  { grid: 'none', name: 'Без сетки' },
+];
 import { DocCache, FileIndex } from '../io/files.ts';
 import { createMarkdown } from '../format/markdown.ts';
 import { BOARD_FILE, boardFolderOf, BoardPaths, boardTitleOf } from '../model/paths.ts';
@@ -43,6 +65,22 @@ function saveCamera(path: string, cam: { x: number; y: number; zoom: number }): 
     localStorage.setItem(CAMERA_KEY + path, JSON.stringify(cam));
   } catch {
     // Нет доступа к хранилищу браузера — просто откроем доску целиком в следующий раз.
+  }
+}
+
+function readFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeFlag(key: string, value: boolean): void {
+  try {
+    localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    // Не запомнится — не страшно.
   }
 }
 
@@ -89,12 +127,31 @@ export function App() {
   const [error, setError] = createSignal('');
   const [zoom, setZoom] = createSignal(1);
   const [showPerf, setShowPerf] = createSignal(false);
+  const [help, setHelp] = createSignal(false);
+  /** Панель досок свёрнута — выезжает поверх доски, когда мышь у левого края. Запоминается. */
+  const [collapsed, setCollapsed] = createSignal(readFlag('vaultboard:sidebar-collapsed'));
+  const [peek, setPeek] = createSignal(false);
+  const [filter, setFilter] = createSignal('');
+  const toggleSidebar = () => {
+    const next = !collapsed();
+    setCollapsed(next);
+    setPeek(false);
+    writeFlag('vaultboard:sidebar-collapsed', next);
+  };
+  const shownBoards = () => {
+    const q = filter().trim().toLowerCase();
+    return q ? boards().filter((b) => b.path.toLowerCase().includes(q)) : boards();
+  };
   const [bench, setBench] = createSignal<PhaseResult[] | null>(null);
   const [benchPhase, setBenchPhase] = createSignal('');
   const [newName, setNewName] = createSignal<string | null>(null);
   const [viewer, setViewer] = createSignal<{ items: ImageItem[]; index: number } | null>(null);
   const [panel, setPanel] = createSignal<{ path: string; mode: DocMode } | null>(null);
   const [quick, setQuick] = createSignal(false);
+  const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | null>(null);
+  const [exporting, setExporting] = createSignal<{ area: 'board' | 'selection'; selection: Rect | null } | null>(null);
+  const [stylesOpen, setStylesOpen] = createSignal(false);
+  const [library, setLibrary] = createSignal<Record<string, StyleDef>>({});
   let filePicker!: HTMLInputElement;
 
   let noticeTimer = 0;
@@ -253,6 +310,112 @@ export function App() {
     if (card) opened!.editor.focusItem(card.id);
   }
 
+  // ---------- меню по правой кнопке ----------
+
+  function setBackground(change: Partial<Background>) {
+    if (!opened) return;
+    const cur = opened.store.doc.background ?? { color: '#f7f7f5', grid: 'dots' as GridKind };
+    opened.store.transact('Фон доски', () => opened!.store.setProp('background', { ...cur, ...change }));
+  }
+
+  function openExport(area: 'board' | 'selection') {
+    setExporting({ area, selection: opened?.editor.selectionWorldRect() ?? null });
+  }
+
+  async function runExport(area: Rect, scale: number, format: ExportFormat) {
+    const v = view()!;
+    const result = await exportBoard({ renderTile: (r, s, w, h) => v.renderTile(r, s, w, h), background: v.backgroundColor }, area, scale, format);
+    const base = (current() || 'доска').replace(/\/доска\.board$/i, '').split('/').pop()!.replace(/\.board$/i, '');
+    const how = await saveBlob(result.blob, `${base}.${format}`);
+    if (how !== 'cancelled') flash(`Экспорт: ${result.width}×${result.height}, ${(result.blob.size / 1024 / 1024).toFixed(1)} МБ${how === 'downloaded' ? ' — в папке загрузок' : ''}`);
+  }
+
+  function styleSubmenu(): MenuEntry[] {
+    const ed = opened!.editor;
+    const look = ed.selectedLook();
+    return [
+      ...ed.styleNames().map((n, i): MenuEntry => ({ label: n, hint: i < 9 ? `Alt+${i + 1}` : undefined, checked: look?.style === n && look.hasStyle, action: () => ed.applyStyle(n) })),
+      ...(ed.styleNames().length ? ['sep' as const] : []),
+      { label: 'Сохранить как стиль…', action: () => { const n = window.prompt('Название стиля, например «Факт [К]»'); if (n) ed.saveStyle(n); } },
+      { label: `Обновить стиль «${look?.style ?? ''}» по этому объекту`, disabled: !look?.hasStyle, action: () => ed.updateStyleFromSelection() },
+      { label: 'Сбросить к стилю', disabled: !look?.hasStyle, action: () => ed.resetToStyle() },
+      { label: 'Выделить все с этим стилем', disabled: !look?.hasStyle, action: () => look?.style && ed.selectByStyle(look.style) },
+      { label: 'Без стиля', disabled: !look?.hasStyle, action: () => ed.applyStyle(null) },
+      'sep',
+      { label: 'Стили доски…', action: () => setStylesOpen(true) },
+    ];
+  }
+
+  /** Меню по объекту: открыть, буфер обмена, слои, стиль, экспорт выделенного, удаление. */
+  function objectMenu(at: { x: number; y: number }): MenuEntry[] {
+    const ed = opened!.editor;
+    const ui = ed.ui();
+    const file = ed.selectedFile();
+    const text = ed.selectedText();
+    const single = ui.selection.length === 1;
+    const items: MenuEntry[] = [];
+    if (single && file?.kind === 'doc') {
+      items.push({ label: 'Открыть', hint: 'Enter', action: () => setPanel({ path: file.file, mode: 'read' }) });
+      items.push({ label: 'Править', hint: 'Shift+Enter', action: () => setPanel({ path: file.file, mode: 'edit' }) });
+      items.push('sep');
+    }
+    if (single && file?.kind === 'image') {
+      items.push({ label: 'Открыть в просмотре', hint: 'Enter', action: () => openViewer(ui.selection[0]) }, 'sep');
+    }
+    items.push(
+      { label: 'Вырезать', hint: 'Ctrl+X', action: () => ed.clipboardCommand('cut') },
+      { label: 'Копировать', hint: 'Ctrl+C', action: () => ed.clipboardCommand('copy') },
+      { label: 'Вставить', hint: 'Ctrl+V', action: () => void ed.pasteAt(at) },
+      { label: 'Дубликат', hint: 'Ctrl+D', action: () => ed.duplicate() },
+      'sep',
+      { label: 'На передний план', hint: 'Ctrl+]', action: () => ed.bringToFront() },
+      { label: 'На задний план', hint: 'Ctrl+[', action: () => ed.sendToBack() },
+      { label: ui.selection.every((id) => opened!.store.get(id)?.locked) ? 'Открепить' : 'Закрепить', action: () => ed.toggleLock() },
+      'sep',
+      { label: 'Стиль', submenu: styleSubmenu() },
+    );
+    if (single && text) items.push({ label: 'В документ', action: () => void convertToDoc() });
+    items.push('sep', { label: 'Экспорт выделенного…', hint: 'PNG, JPG, PDF', action: () => openExport('selection') }, 'sep');
+    if (single && file) items.push({ label: 'Удалить файл с диска…', danger: true, action: () => void trashSelectedFile() });
+    items.push({ label: 'Убрать с доски', hint: 'Delete', danger: true, action: () => ed.deleteSelection() });
+    return items;
+  }
+
+  /** Меню по пустой доске: вставить и создать здесь, выделить всё, фон, стили, экспорт. */
+  function boardMenu(at: { x: number; y: number }): MenuEntry[] {
+    const ed = opened!.editor;
+    const bg = opened!.store.doc.background ?? { color: '#f7f7f5', grid: 'dots' as GridKind };
+    return [
+      { label: 'Вставить здесь', hint: 'Ctrl+V', action: () => void ed.pasteAt(at) },
+      {
+        label: 'Создать здесь',
+        submenu: [
+          { label: 'Стикер', hint: 'N', action: () => ed.createStickyAt(at) },
+          { label: 'Текст', hint: 'T', action: () => ed.createTextAt(at) },
+          { label: 'Документ', hint: 'D', action: () => void createDoc(at) },
+          { label: 'Прямоугольник', hint: 'R', action: () => ed.createShapeAt(at, 'rect') },
+          { label: 'Овал', hint: 'O', action: () => ed.createShapeAt(at, 'ellipse') },
+        ],
+      },
+      { label: 'Фото и файлы…', action: () => filePicker.click() },
+      'sep',
+      { label: 'Выделить всё', hint: 'Ctrl+A', action: () => ed.selectAll() },
+      { label: 'Показать всю доску', hint: 'Shift+1', action: () => view()!.fitAll() },
+      'sep',
+      {
+        label: 'Фон',
+        submenu: [
+          ...GRIDS.map((g): MenuEntry => ({ label: g.name, checked: bg.grid === g.grid, action: () => setBackground({ grid: g.grid }) })),
+          'sep',
+          ...BACKGROUNDS.map((b): MenuEntry => ({ label: b.name, swatch: b.color, checked: bg.color === b.color, action: () => setBackground({ color: b.color }) })),
+        ],
+      },
+      { label: 'Стили доски…', action: () => setStylesOpen(true) },
+      'sep',
+      { label: 'Экспорт доски…', hint: 'PNG, JPG, PDF', action: () => openExport('board') },
+    ];
+  }
+
   function openViewer(id: string) {
     const store = opened?.store;
     if (!store) return;
@@ -308,6 +471,7 @@ export function App() {
     ed.onOpenDoc = (path, mode) => setPanel({ path, mode });
     ed.onCreateDoc = (at) => void createDoc(at);
     ed.onQuickOpen = () => setQuick(true);
+    ed.onContextMenu = (e) => setMenu({ x: e.clientX, y: e.clientY, items: e.target ? objectMenu(e.at) : boardMenu(e.at) });
     const off = store.onChange((ops) => {
       v.apply(ops);
       ed.storeChanged(ops);
@@ -416,6 +580,7 @@ export function App() {
     setView(v);
     v.setDocs(docs, markdown);
     void files.refresh();
+    void vault.getLibrary().then(setLibrary).catch(() => undefined);
     if (import.meta.env.DEV) Object.assign(window, { __view: v, __docs: docs, __files: files });
 
     const onKey = (e: KeyboardEvent) => {
@@ -452,9 +617,24 @@ export function App() {
 
   return (
     <div class="app">
-      <aside class="sidebar">
-        <div class="brand">vaultboard</div>
-        <div class="root" title={root()}>{root()}</div>
+      <aside
+        class="sidebar"
+        classList={{ collapsed: collapsed(), peek: collapsed() && peek() }}
+        onMouseLeave={() => collapsed() && setPeek(false)}
+      >
+        <div class="side-head">
+          <span class="logo">vb</span>
+          <div class="side-title">
+            <b>vaultboard</b>
+            <span class="root" title={root()}>{root()}</span>
+          </div>
+          <button class="icon-btn" title={collapsed() ? 'Закрепить панель' : 'Свернуть панель — она будет выезжать у левого края'} onClick={toggleSidebar}>
+            {collapsed() ? '📌' : '⟨'}
+          </button>
+        </div>
+        <div class="side-search">
+          <input placeholder="Найти доску…" value={filter()} onInput={(e) => setFilter(e.currentTarget.value)} onKeyDown={(e) => e.stopPropagation()} />
+        </div>
         <div class="section">
           Доски
           <button class="section-btn" title="Новая доска" onClick={() => setNewName(newName() === null ? 'Доски/Новая доска' : null)}>+</button>
@@ -464,38 +644,30 @@ export function App() {
             <input
               value={newName()!}
               onInput={(e) => setNewName(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === 'Escape' && setNewName(null)}
+              onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setNewName(null); }}
               ref={(el) => setTimeout(() => el.select())}
             />
             <div class="new-board-hint">Папка доски от корня базы — в ней будет всё: доска, фото, документы, история. Enter — создать, Esc — отмена.</div>
             <input type="submit" hidden />
           </form>
         </Show>
-        <For each={boards()} fallback={<div class="empty">Досок пока нет</div>}>
-          {(b) => (
-            <button class="board" classList={{ active: current() === b.path }} onClick={() => openBoard(b.path)} title={b.path}>
-              <span class="kind">{b.kind === 'canvas' ? 'Obsidian' : 'доска'}</span>
-              {b.kind === 'board' ? boardTitleOf(b.path) : b.path}
-            </button>
-          )}
-        </For>
-        <div class="section">Замер скорости</div>
-        <div class="bench">
-          <button onClick={() => openBench(1000, true)}>1000</button>
-          <button onClick={() => openBench(5000, true)}>5000</button>
-          <button onClick={() => openBench(20000, true)}>20000</button>
-        </div>
-        <div class="hint">
-          <b>Мышь:</b> левая по пустому — двигать доску · по объекту — выделить и тащить · Shift+перетаскивание — выделить рамкой · Alt+перетаскивание — копия · колесо — зум<br />
-          <b>Создать под курсором:</b> N стикер · T текст · R прямоугольник · O овал · D документ · двойной щелчок — текст · L линия · F рамка · Ctrl+K — найти заметку базы<br />
-          <b>Рисовать:</b> P ручка · M выделитель · E ластик · перо планшета — сразу, мышь — с Alt · Shift при протягивании линии — ровно по 45°<br />
-          <b>В стикере:</b> Tab — следующий справа · Ctrl+Enter — ниже · Esc — готово<br />
-          <b>Правка:</b> Ctrl+Z / Ctrl+Y · Ctrl+C/X/V · Ctrl+D дубликат · Delete · стрелки сдвиг · Enter править текст<br />
-          <b>Вид:</b> Shift+1 вся доска · Shift+2 к выделенному · Shift+0 100% · ` счётчик
+        <div class="board-list">
+          <For each={shownBoards()} fallback={<div class="empty">{filter() ? 'Ничего не нашлось' : 'Досок пока нет'}</div>}>
+            {(b) => (
+              <button class="board" classList={{ active: current() === b.path }} onClick={() => openBoard(b.path)} title={b.path}>
+                <span class="board-icon">{b.kind === 'canvas' ? '◇' : '▦'}</span>
+                <span class="board-name">{b.kind === 'board' ? boardTitleOf(b.path) : b.path.replace(/\.canvas$/i, '')}</span>
+                <Show when={b.kind === 'canvas'}><span class="kind">Obsidian</span></Show>
+              </button>
+            )}
+          </For>
         </div>
       </aside>
       <main class="stage">
         <div class="board-host" ref={host} />
+        <Show when={collapsed() && !peek()}>
+          <div class="sidebar-edge" onMouseEnter={() => setPeek(true)} title="Доски" />
+        </Show>
         <Show when={editor() && ui()}>
           <Toolbar
             editor={editor()!}
@@ -509,9 +681,13 @@ export function App() {
             onConvertToDoc={() => void convertToDoc()}
             onOpenLink={(fromId, target) => void openLinkFromBoard(fromId, target)}
             onTrashFile={() => void trashSelectedFile()}
+            onOpenStyles={() => setStylesOpen(true)}
           />
         </Show>
         <div class="topbar">
+          <Show when={collapsed()}>
+            <button class="icon-btn topbar-btn" title="Доски" onClick={() => setPeek(!peek())}>☰</button>
+          </Show>
           <span class="title">{current() || 'Выбери доску слева'}</span>
           <Show when={save()}>
             <span class="save" classList={{ bad: save()!.kind === 'error' || save()!.kind === 'conflict' }}>{saveLabel(save()!)}</span>
@@ -533,7 +709,13 @@ export function App() {
         <Show when={notice()}>
           <div class="notice">{notice()}</div>
         </Show>
-        <div class="zoom">{Math.round(zoom() * 100)}%</div>
+        <div class="corner">
+          <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
+          <div class="zoom">{Math.round(zoom() * 100)}%</div>
+        </div>
+        <Show when={help()}>
+          <HelpDialog onClose={() => setHelp(false)} onBench={(n) => void openBench(n, true)} />
+        </Show>
         <input
           ref={filePicker}
           type="file"
@@ -564,6 +746,32 @@ export function App() {
             onClose={() => setQuick(false)}
             onPlace={(path) => opened?.editor.placeDoc(path, opened.editor.cursorPoint())}
             onOpen={(path) => setPanel({ path, mode: 'read' })}
+          />
+        </Show>
+        <Show when={menu()}>
+          <ContextMenu x={menu()!.x} y={menu()!.y} items={menu()!.items} onClose={() => setMenu(null)} />
+        </Show>
+        <Show when={exporting() && view()}>
+          <ExportDialog
+            board={view()!.boardBounds}
+            selection={exporting()!.selection}
+            initialArea={exporting()!.area}
+            onExport={runExport}
+            onClose={() => setExporting(null)}
+          />
+        </Show>
+        <Show when={stylesOpen() && editor() && ui()}>
+          <StylesPanel
+            editor={editor()!}
+            ui={ui()!}
+            library={library()}
+            onSaveToLibrary={(name, def) => {
+              const next = { ...library(), [name]: def };
+              setLibrary(next);
+              void vault.putLibrary(next);
+              flash(`Стиль «${name}» в общей библиотеке базы — его можно добавить на любую доску`);
+            }}
+            onClose={() => setStylesOpen(false)}
           />
         </Show>
         <Show when={viewer()}>
