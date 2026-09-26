@@ -16,6 +16,8 @@ export interface SnapResult {
   dx: number;
   dy: number;
   guides: Guide[];
+  /** Объекты, к которым прилипли, — их подсвечиваем, чтобы было видно, с чем выровнялось. */
+  targets: Rect[];
 }
 
 const xOf = (r: Rect, e: XEdge) => (e === 'l' ? r.x : e === 'c' ? r.x + r.w / 2 : r.x + r.w);
@@ -51,6 +53,7 @@ export function snapRect(r: Rect, others: Rect[], tol: number, grid: number, xs:
   // Направляющие: вертикальная — через всех соседей на этой линии, горизонтальная — так же.
   const moved = { x: r.x + dx, y: r.y + dy, w: r.w, h: r.h };
   const guides: Guide[] = [];
+  const targets = new Set<Rect>();
   if (bestX) {
     const x = bestX.value;
     let y1 = moved.y, y2 = moved.y + moved.h;
@@ -58,6 +61,7 @@ export function snapRect(r: Rect, others: Rect[], tol: number, grid: number, xs:
       if ((['l', 'c', 'r'] as XEdge[]).some((e) => Math.abs(xOf(o, e) - x) < 0.5)) {
         y1 = Math.min(y1, o.y);
         y2 = Math.max(y2, o.y + o.h);
+        targets.add(o);
       }
     }
     guides.push({ x1: x, y1, x2: x, y2 });
@@ -69,9 +73,10 @@ export function snapRect(r: Rect, others: Rect[], tol: number, grid: number, xs:
       if ((['t', 'm', 'b'] as YEdge[]).some((e) => Math.abs(yOf(o, e) - y) < 0.5)) {
         x1 = Math.min(x1, o.x);
         x2 = Math.max(x2, o.x + o.w);
+        targets.add(o);
       }
     }
     guides.push({ x1, y1: y, x2, y2: y });
   }
-  return { dx, dy, guides };
+  return { dx, dy, guides, targets: [...targets] };
 }

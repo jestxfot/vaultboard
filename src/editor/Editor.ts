@@ -18,7 +18,7 @@ import { DEFAULT_STICKY } from '../format/colors.ts';
 import type { BoardView } from '../render/BoardView.ts';
 import type { PerfMonitor } from '../perf/monitor.ts';
 import { type Anchor, geomBounds, lineGeometry, lineMidpoint, type Point, type Rect, resolveAnchor } from '../render/geometry.ts';
-import { drawStroke, textBox } from '../render/draw.ts';
+import { drawMarker, drawStroke, markerColor, textBox } from '../render/draw.ts';
 import { decodePoints, encodePoints, shiftPoints, type StrokePoint } from '../format/strokes.ts';
 import { recognize } from './recognize.ts';
 import { embedUrl } from '../format/embed.ts';
@@ -130,6 +130,9 @@ export interface EditorUi {
   smart: boolean;
 }
 
+/** Больше стольких объектов для привязки не берём — ближайших хватает. */
+const SNAP_MAX = 1500;
+
 const HANDLE_CURSOR: Record<Handle, string> = {
   nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize',
   n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
@@ -196,6 +199,8 @@ export class Editor {
   private spaceDown = false;
   /** Направляющие привязки, которые сейчас видны (во время перетаскивания или изменения размера). */
   private guides: Guide[] = [];
+  /** Объекты, к которым сейчас прилипает перетаскиваемое, — подсвечиваются. */
+  private snapHits: Rect[] = [];
   /** Последний рисунок: штрихи, нарисованные подряд и рядом, добавляются в него, а не плодят объекты. */
   private lastDrawing: { id: string; time: number } | null = null;
   private readonly cleanup: (() => void)[] = [];
@@ -209,7 +214,7 @@ export class Editor {
       onInput: (value) => this.onTextInput(value),
       onClose: (reason) => this.onTextClose(reason),
     });
-    view.overlayPainter = (g) => this.paint(g);
+    view.overlayPainter = (g, marker) => this.paint(g, marker);
     view.beforeFrame = () => this.processPointer();
     view.linesOf = (id) => store.linesOf(id);
     this.bind();
@@ -442,17 +447,30 @@ export class Editor {
       return;
     }
 
-    if (p.shift || p.ctrl) {
-      this.gesture = { kind: 'marquee', start: w, end: w, base: p.shift ? new Set(this.selection) : new Set() };
-      if (!p.shift) this.select([]);
-      return;
-    }
     // По пустому месту перо планшета рисует сразу, без выбора инструмента; мышь — с зажатым Alt.
     if (e.pointerType === 'pen' || p.alt) {
       this.startDraw(e, 'pen');
       return;
     }
-    this.startPan(p, true);
+    // Щёлкнули по объекту закреплённого слоя — он не выделяется; скажем почему, чтобы это не выглядело поломкой.
+    this.explainLockedLayer(w);
+    // Левая кнопка по пустому месту — выделение рамкой (Shift — добавить к выделенному).
+    // Доску двигают правой кнопкой, средней или пробелом.
+    this.gesture = { kind: 'marquee', start: w, end: w, base: p.shift ? new Set(this.selection) : new Set() };
+    if (!p.shift) this.select([]);
+  }
+
+  /** Слои, про которые уже подсказали в этот раз, — чтобы не повторять подсказку на каждый щелчок. */
+  private explainedLayers = new Set<string>();
+
+  private explainLockedLayer(w: Point): void {
+    const under = this.view.search({ x: w.x, y: w.y, w: 0, h: 0 }, true).find((i) => !isLine(i) && this.view.isLayerLocked(i) && inRect(w, i));
+    if (!under) return;
+    const id = layerOf(under);
+    if (this.explainedLayers.has(id)) return;
+    this.explainedLayers.add(id);
+    const name = this.layers().find((l) => l.id === id)?.name ?? BASE_NAME;
+    this.onNotice?.(`Слой «${name}» закреплён — его объекты не выделяются. Открепить: Shift+L → замок у слоя`);
   }
 
   private startPan(p: PointerState, clearOnClick: boolean): void {
@@ -574,6 +592,7 @@ export class Editor {
     const g = this.gesture;
     this.gesture = null;
     this.guides = [];
+    this.snapHits = [];
     this.host.style.cursor = this.tool === 'select' ? (this.spaceDown ? 'grab' : '') : 'crosshair';
     if (!g) return;
     if (g.kind === 'draw') g.predicted = [];
@@ -834,14 +853,25 @@ export class Editor {
   }
 
   /** Соседи для привязки: объекты рядом, кроме перетаскиваемых и линий. */
+  /**
+   * С чем выравнивать: всё, что видно на экране (как в Miro — год слева видит год справа через весь экран),
+   * плюс немного вокруг. Если объектов тысячи — берём ближайшие, чтобы привязка не тормозила.
+   */
   private snapTargets(area: Rect, exclude: Set<string>): Rect[] {
-    const reach = 600 / this.view.cam.zoom;
-    const around = { x: area.x - reach, y: area.y - reach, w: area.w + reach * 2, h: area.h + reach * 2 };
-    return this.view
-      .search(around)
+    const a = this.view.screenToWorld(0, 0);
+    const { w, h } = this.view.screen;
+    const b = this.view.screenToWorld(w, h);
+    const x0 = Math.min(a.x, area.x), y0 = Math.min(a.y, area.y);
+    const x1 = Math.max(b.x, area.x + area.w), y1 = Math.max(b.y, area.y + area.h);
+    const cx = area.x + area.w / 2, cy = area.y + area.h / 2;
+    const rects = this.view
+      .search({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, true)
       .filter((i) => !isLine(i) && !exclude.has(i.id) && i.kind !== 'drawing')
       .map((i) => this.view.rectOf(i.id)!)
       .filter(Boolean);
+    if (rects.length <= SNAP_MAX) return rects;
+    const dist = (r: Rect) => Math.hypot(r.x + r.w / 2 - cx, r.y + r.h / 2 - cy);
+    return rects.sort((p, q) => dist(p) - dist(q)).slice(0, SNAP_MAX);
   }
 
   private processMove(w: Point, axisLock: boolean, noSnap = false): void {
@@ -854,12 +884,14 @@ export class Editor {
     }
     // Привязка к соседям и сетке; Ctrl — без привязки.
     this.guides = [];
+    this.snapHits = [];
     if (g.base && !noSnap) {
       const moved = { x: g.base.x + dx, y: g.base.y + dy, w: g.base.w, h: g.base.h };
       const snap = snapRect(moved, this.snapTargets(moved, new Set(g.boxes.keys())), 6 / this.view.cam.zoom, 8, ['l', 'c', 'r'], ['t', 'm', 'b']);
       if (!(axisLock && dx === 0)) dx += snap.dx;
       if (!(axisLock && dy === 0)) dy += snap.dy;
       this.guides = snap.guides;
+      this.snapHits = snap.targets;
     }
     const shift = (ep: Endpoint, orig: Endpoint): Endpoint => ('item' in orig ? ep : { x: round2(orig.x + dx), y: round2(orig.y + dy) });
     this.store.live(() => {
@@ -894,6 +926,7 @@ export class Editor {
     if (g.handle.includes('s')) y1 = Math.max(w.y, y0 + 10);
     // Привязка того края, который тянут, к краям соседей и сетке.
     this.guides = [];
+    this.snapHits = [];
     if (!noSnap) {
       const xs: XEdge[] = g.handle.includes('w') ? ['l'] : g.handle.includes('e') ? ['r'] : [];
       const ys: YEdge[] = g.handle.includes('n') ? ['t'] : g.handle.includes('s') ? ['b'] : [];
@@ -904,6 +937,7 @@ export class Editor {
       if (ys[0] === 't') y0 += snap.dy;
       if (ys[0] === 'b') y1 += snap.dy;
       this.guides = snap.guides;
+      this.snapHits = snap.targets;
     }
     let sx = (x1 - x0) / s.w, sy = (y1 - y0) / s.h;
     const corner = g.handle.length === 2;
@@ -2124,7 +2158,7 @@ export class Editor {
 
   // ---------- слой поверх доски ----------
 
-  private paint(g: Graphics): void {
+  private paint(g: Graphics, marker: Graphics): void {
     const outline = (r: Rect, width: number, alpha = 1) => {
       const s = this.toScreenRect(r);
       g.rect(s.x, s.y, s.w, s.h).stroke({ width, color: BLUE, alpha });
@@ -2161,6 +2195,11 @@ export class Editor {
     }
     for (const e of this.lineEnds()) g.circle(e.x, e.y, 6).fill(0xffffff).stroke({ width: 2, color: BLUE });
 
+    // Подсветка объектов, к которым прилипли: мягкая розовая «тень» и рамка — видно, с чем выровнялось.
+    for (const r of this.snapHits) {
+      const s = this.toScreenRect(r);
+      g.roundRect(s.x - 3, s.y - 3, s.w + 6, s.h + 6, 4).fill({ color: 0xff3d8b, alpha: 0.08 }).stroke({ width: 1.5, color: 0xff3d8b, alpha: 0.7 });
+    }
     for (const gd of this.guides) {
       const a = this.view.worldToScreen(gd.x1, gd.y1), b = this.view.worldToScreen(gd.x2, gd.y2);
       g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ width: 1, color: 0xff3d8b });
@@ -2169,7 +2208,8 @@ export class Editor {
     const z = this.view.cam.zoom;
     if (gs?.kind === 'draw') {
       const pts = [...gs.points, ...gs.predicted].map((q) => ({ ...this.view.worldToScreen(q.x, q.y), p: q.p }));
-      drawStroke(g, { tool: gs.tool, color: gs.color, size: gs.size * z }, pts, false);
+      if (gs.tool === 'marker') drawMarker(marker, pts, gs.size * z, markerColor(gs.color, this.view.backgroundNum));
+      else drawStroke(g, { tool: gs.tool, color: gs.color, size: gs.size * z }, pts, false);
     } else if (gs?.kind === 'lasso' && gs.points.length > 1) {
       const pts = gs.points.map((q) => this.view.worldToScreen(q.x, q.y));
       g.poly(pts.flatMap((q) => [q.x, q.y]), true).fill({ color: BLUE, alpha: 0.05 }).stroke({ width: 1.5, color: BLUE, alpha: 0.8 });

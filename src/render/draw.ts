@@ -1,6 +1,6 @@
 // Как выглядит каждый вид объекта. Рисует в Pixi Graphics в координатах объекта (0,0 — его левый верхний угол).
 import { CanvasTextMetrics, Graphics, Text, TextStyle, type TextStyleOptions } from 'pixi.js';
-import getStroke from 'perfect-freehand';
+import { drawInk, smoothPath } from './ink.ts';
 import type { Align, BoxItem, DrawingItem, EndCap, LineItem, ShapeKind, Stroke } from '../model/types.ts';
 import { decodePoints, type StrokePoint } from '../format/strokes.ts';
 import { DEFAULT_STICKY, hexToNum, isDark, tint } from '../format/colors.ts';
@@ -424,42 +424,64 @@ export function makeLabel(spec: LabelSpec, w: number, h: number, resolution: num
   return label;
 }
 
-/** Мышь не знает нажима — тогда толщину подсказывает скорость руки, как у perfect-freehand по умолчанию. */
-function noPressure(points: StrokePoint[]): boolean {
-  return points.every((p) => Math.abs(p.p - 0.5) < 0.01);
-}
-
-/** Контур штриха ручкой: мягкая линия, толщина которой зависит от нажима пера или скорости мыши. */
-export function penOutline(points: StrokePoint[], size: number, last: boolean): number[] {
-  const outline = getStroke(
-    points.map((p) => [p.x, p.y, p.p]),
-    { size, thinning: 0.55, smoothing: 0.5, streamline: 0.45, simulatePressure: noPressure(points), last },
-  );
-  return outline.flat();
-}
-
 /** Один штрих в координатах `pts` (уже пересчитанных в координаты объекта). */
-export function drawStroke(g: Graphics, stroke: Pick<Stroke, 'tool' | 'color' | 'size'>, pts: StrokePoint[], last = true): void {
+export function drawStroke(g: Graphics, stroke: Pick<Stroke, 'tool' | 'color' | 'size'>, pts: StrokePoint[], _last = true): void {
   if (!pts.length) return;
   const color = hexToNum(stroke.color);
   if (stroke.tool === 'marker') {
-    // Маркер-выделитель: широкий плоский полупрозрачный штрих. Один путь — поэтому в местах
-    // самопересечения цвет не темнеет, как у настоящего маркера.
-    g.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
-    if (pts.length === 1) g.lineTo(pts[0].x + 0.01, pts[0].y);
-    g.stroke({ width: stroke.size, color, alpha: 0.38, cap: 'round', join: 'round' });
+    drawMarker(g, pts, stroke.size, color);
     return;
   }
-  const outline = penOutline(pts, stroke.size, last);
-  if (outline.length >= 6) g.poly(outline).fill(color);
+  drawInk(g, pts, stroke.size, color);
+}
+
+/** Прозрачность выделителя: сколько его цвета проступает поверх белого листа. */
+export const MARKER_ALPHA = 0.38;
+
+/**
+ * Цвет выделителя, заранее смешанный с фоном доски, — непрозрачный. Рисуется в режиме наложения
+ * «темнее из двух» (на светлом фоне) или «светлее из двух» (на тёмном): там, где штрих перекрывает сам себя,
+ * цвет не густеет, а тёмный текст под выделителем остаётся тёмным — как у настоящего маркера.
+ */
+export function markerColor(color: string, background: number): number {
+  const c = hexToNum(color);
+  const mix = (shift: number) => {
+    const a = (c >> shift) & 255, b = (background >> shift) & 255;
+    return Math.round(b + (a - b) * MARKER_ALPHA) << shift;
+  };
+  return mix(16) | mix(8) | mix(0);
+}
+
+/** Штрих выделителя: широкий плоский путь, сглаженный. Цвет — уже смешанный (см. markerColor). */
+export function drawMarker(g: Graphics, pts: StrokePoint[], size: number, color: number): void {
+  const path = smoothPath(pts);
+  if (!path.length) return;
+  g.moveTo(path[0].x, path[0].y);
+  for (let i = 1; i < path.length; i++) g.lineTo(path[i].x, path[i].y);
+  if (path.length === 1) g.lineTo(path[0].x + 0.01, path[0].y);
+  g.stroke({ width: size, color, cap: 'round', join: 'round' });
 }
 
 /** Весь рисунок: штрихи записаны в размере `vw×vh`; если рисунок растянули — масштабируются. */
 export function drawStrokes(g: Graphics, item: DrawingItem): void {
   const sx = item.w / (item.vw || item.w || 1), sy = item.h / (item.vh || item.h || 1);
   for (const stroke of item.strokes) {
+    // Выделитель рисуется отдельным слоем со своим режимом наложения (drawMarkers).
+    if (stroke.tool === 'marker') continue;
     const pts = decodePoints(stroke.pts).map((p) => ({ x: p.x * sx, y: p.y * sy, p: p.p }));
     drawStroke(g, stroke, pts);
   }
+}
+
+/** Штрихи выделителя рисунка — в свой Graphics, которому ставят режим наложения min/max. */
+export function drawMarkers(g: Graphics, item: DrawingItem, background: number): boolean {
+  const sx = item.w / (item.vw || item.w || 1), sy = item.h / (item.vh || item.h || 1);
+  let any = false;
+  for (const stroke of item.strokes) {
+    if (stroke.tool !== 'marker') continue;
+    const pts = decodePoints(stroke.pts).map((p) => ({ x: p.x * sx, y: p.y * sy, p: p.p }));
+    drawMarker(g, pts, stroke.size, markerColor(stroke.color, background));
+    any = true;
+  }
+  return any;
 }

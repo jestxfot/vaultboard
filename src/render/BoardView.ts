@@ -21,7 +21,7 @@ import { BoardPaths } from '../model/paths.ts';
 import { isLine } from '../model/types.ts';
 import type { Op } from '../model/store.ts';
 import type { PerfMonitor } from '../perf/monitor.ts';
-import { dashPattern, dashPolyline, drawBox, drawLine, farColor, FONT, labelSpec, type LabelSpec, makeLabel } from './draw.ts';
+import { dashPattern, dashPolyline, drawBox, drawLine, drawMarkers, farColor, FONT, labelSpec, type LabelSpec, makeLabel } from './draw.ts';
 import { ImageCache, type Level } from './images.ts';
 import { ensureFont } from './fonts.ts';
 import { embedUrl } from '../format/embed.ts';
@@ -172,8 +172,8 @@ export class BoardView {
   driver: ((t: number) => void) | null = null;
   /** Вызывается в начале каждого кадра — редактор применяет здесь накопленное движение мыши. */
   beforeFrame: (() => void) | null = null;
-  /** Рисует слой поверх доски (выделение, ручки) в экранных координатах. */
-  overlayPainter: ((g: Graphics) => void) | null = null;
+  /** Рисует слой поверх доски (выделение, ручки) в экранных координатах; второй слой — для выделителя. */
+  overlayPainter: ((g: Graphics, marker: Graphics) => void) | null = null;
   /** Какие линии прицеплены к объекту — берётся из хранилища. */
   linesOf: (id: string) => string[] = () => [];
 
@@ -199,6 +199,8 @@ export class BoardView {
   private moving = false;
   private readonly world = new Container({ isRenderGroup: true });
   private readonly overlay = new Graphics();
+  /** Выделитель, который рисуют прямо сейчас, — отдельный слой со своим режимом наложения. */
+  private readonly markerOverlay = new Graphics();
   /** Клетка как в Miro: линии рисуются в пикселях экрана, всегда ровно в 1 пиксель. */
   private readonly gridLines = new Graphics();
   private gridMode = 'dots';
@@ -276,7 +278,7 @@ export class BoardView {
     };
 
     this.grid = new TilingSprite({ texture: dotTexture(), width: 1, height: 1 });
-    this.app.stage.addChild(this.grid, this.gridLines, this.world, this.overlay);
+    this.app.stage.addChild(this.grid, this.gridLines, this.world, this.markerOverlay, this.overlay);
 
     this.resizeObserver = new ResizeObserver(() => {
       this.app.resize();
@@ -399,7 +401,7 @@ export class BoardView {
     if (stylesChanged || darkChanged) {
       for (const old of [...this.views.values()]) {
         // Смена стилей — перестроить объекты со стилем; светлый/тёмный фон — текст и линии.
-        const affected = (stylesChanged && old.item.style) || (darkChanged && (old.item.kind === 'text' || old.item.kind === 'line'));
+        const affected = (stylesChanged && old.item.style) || (darkChanged && (old.item.kind === 'text' || old.item.kind === 'line' || old.item.kind === 'drawing'));
         if (!affected) continue;
         const at = this.world.getChildIndex(old.container);
         const item = old.item;
@@ -964,7 +966,9 @@ export class BoardView {
     if (moved || this.overlayDirty) {
       this.overlayDirty = false;
       this.overlay.clear();
-      this.overlayPainter?.(this.overlay);
+      this.markerOverlay.clear();
+      this.markerOverlay.blendMode = this.markerBlend;
+      this.overlayPainter?.(this.overlay, this.markerOverlay);
     }
     this.runQueues(start + FRAME_BUDGET_MS);
     this.app.render();
@@ -1140,6 +1144,16 @@ export class BoardView {
       }
     } else {
       drawBox(g, this.look(item));
+      if (item.kind === 'drawing') {
+        // Выделитель — отдельный слой в режиме «темнее из двух»: перекрытия не густеют, а штрихи пера под ним остаются тёмными.
+        const mg = new Graphics();
+        if (drawMarkers(mg, item, this.backgroundNum)) {
+          mg.blendMode = this.darkBackground ? 'max' : 'min';
+          v.container.addChild(mg);
+        } else {
+          mg.destroy();
+        }
+      }
       if (item.kind === 'link' && (item.title || embedUrl(item.url))) {
         v.gfx = g;
         v.container.addChildAt(g, v.far ? 1 : 0);
@@ -1399,6 +1413,16 @@ export class BoardView {
   }
 
   // ---------- экспорт ----------
+
+  /** Цвет фона числом — с ним смешивается цвет выделителя. */
+  get backgroundNum(): number {
+    return hexToNum(this.backgroundColor);
+  }
+
+  /** Режим наложения выделителя: на светлом фоне — «темнее из двух», на тёмном — «светлее». */
+  get markerBlend(): 'min' | 'max' {
+    return this.darkBackground ? 'max' : 'min';
+  }
 
   /** Цвет фона доски — экспорт кладёт картинку на него. */
   get backgroundColor(): string {
