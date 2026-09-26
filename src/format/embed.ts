@@ -52,6 +52,35 @@ export function embedUrl(raw: string, autoplay = false): string | null {
   return `https://player.vimeo.com/video/${v.id}${autoplay ? '?autoplay=1' : ''}`;
 }
 
+/** Попросить плеер присылать своё состояние (играет / пауза / конец). */
+export function listenPlayer(frame: HTMLIFrameElement): void {
+  const target = frame.contentWindow;
+  if (!target) return;
+  if (frame.src.includes('vimeo.com')) {
+    for (const ev of ['play', 'pause', 'ended']) target.postMessage(JSON.stringify({ method: 'addEventListener', value: ev }), '*');
+  } else {
+    target.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*');
+  }
+}
+
+/** Разобрать сообщение плеера: true — играет, false — пауза или конец, null — сообщение не о состоянии. */
+export function playerState(data: unknown): boolean | null {
+  let msg: { event?: string; info?: { playerState?: number } } | null = null;
+  try {
+    msg = typeof data === 'string' ? JSON.parse(data) : (data as typeof msg);
+  } catch {
+    return null;
+  }
+  if (!msg || typeof msg !== 'object') return null;
+  // YouTube: playerState 1 — играет, 3 — грузится (тоже «играет»), 2 — пауза, 0 — конец.
+  const st = msg.info?.playerState;
+  if (typeof st === 'number') return st === 1 || st === 3 ? true : st === 0 || st === 2 ? false : null;
+  // Vimeo: события play / pause / ended.
+  if (msg.event === 'play') return true;
+  if (msg.event === 'pause' || msg.event === 'ended') return false;
+  return null;
+}
+
 /** Сказать плееру «играй» или «пауза» — через postMessage, как это делают официальные API YouTube и Vimeo. */
 export function playerCommand(frame: HTMLIFrameElement, play: boolean): void {
   const target = frame.contentWindow;

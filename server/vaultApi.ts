@@ -362,15 +362,22 @@ export function vaultApi(root: string): Plugin {
     sendJson(res, 404, { error: 'Нет такого запроса' });
   }
 
+  const api = (req: IncomingMessage, res: ServerResponse) => {
+    handle(req, res).catch((err: unknown) => {
+      const status = err instanceof VaultPathError ? 403 : err instanceof BoardFormatError ? 400 : 500;
+      sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
+    });
+  };
+
   return {
     name: 'vaultboard-vault-api',
     configureServer(server) {
-      server.middlewares.use('/api', (req, res) => {
-        handle(req, res).catch((err: unknown) => {
-          const status = err instanceof VaultPathError ? 403 : err instanceof BoardFormatError ? 400 : 500;
-          sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
-        });
-      });
+      server.middlewares.use('/api', api);
+    },
+    // Стабильная копия (npm run stable): собранное приложение с тем же доступом к базе.
+    // Её не перезагружают правки кода — на ней можно спокойно работать, пока идёт разработка.
+    configurePreviewServer(server) {
+      server.middlewares.use('/api', api);
     },
   };
 }
