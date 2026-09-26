@@ -6,7 +6,7 @@
 //
 // Жесты (перетаскивание, набор текста) меняют доску «вживую» каждый кадр,
 // но в историю попадают одной записью — одно перетаскивание отменяется одним Ctrl+Z.
-import type { BoardDoc, Item } from './types.ts';
+import type { BoardDoc, CommentThread, Item } from './types.ts';
 import { isLine } from './types.ts';
 
 /** Свойства всей доски, которые меняются через историю (их правки отменяются как всё остальное). */
@@ -16,7 +16,9 @@ export type Op =
   | { t: 'insert'; index: number; item: Item }
   | { t: 'delete'; index: number; item: Item }
   | { t: 'replace'; index: number; before: Item; after: Item }
-  | { t: 'prop'; key: DocProp; before: unknown; after: unknown };
+  | { t: 'prop'; key: DocProp; before: unknown; after: unknown }
+  /** Обсуждение: появилось (before = null), исчезло (after = null) или поменялось. */
+  | { t: 'thread'; index: number; before: CommentThread | null; after: CommentThread | null };
 
 export interface Tx {
   label: string;
@@ -32,11 +34,13 @@ export function invert(op: Op): Op {
     case 'delete': return { t: 'insert', index: op.index, item: op.item };
     case 'replace': return { t: 'replace', index: op.index, before: op.after, after: op.before };
     case 'prop': return { t: 'prop', key: op.key, before: op.after, after: op.before };
+    case 'thread': return { t: 'thread', index: op.index, before: op.after, after: op.before };
   }
 }
 
 function opId(op: Op): string {
   if (op.t === 'prop') return `prop:${op.key}`;
+  if (op.t === 'thread') return `thread:${(op.after ?? op.before)!.id}`;
   return op.t === 'replace' ? op.after.id : op.item.id;
 }
 
@@ -73,6 +77,13 @@ function mergeOps(ops: Op[]): Op[] {
       else out.push({ ...op });
       continue;
     }
+    if (op.t === 'thread') {
+      // Перетаскивание булавки — одна запись: где была в начале, где стала в конце.
+      const prev = out.find((o): o is Extract<Op, { t: 'thread' }> => o.t === 'thread' && opId(o) === id);
+      if (prev) prev.after = op.after;
+      else out.push({ ...op });
+      continue;
+    }
     if (op.t === 'replace') {
       // Объект создан в этом же жесте — сразу пишем его итоговый вид во вставку.
       const ins = lastInsert.get(id);
@@ -94,7 +105,8 @@ function mergeOps(ops: Op[]): Op[] {
       out.push(op);
     }
   }
-  return out;
+  // Обсуждение, которое жест и создал, и удалил, в историю не попадает.
+  return out.filter((o) => o.t !== 'thread' || o.before || o.after);
 }
 
 export type StoreListener = (ops: Op[]) => void;
@@ -194,14 +206,56 @@ export class BoardStore {
     this.run({ t: 'insert', index, item: this.onLayer(item) });
   }
 
-  /** Удаляет объект вместе с прицепленными к нему линиями. */
+  /**
+   * Удаляет объект вместе с прицепленными к нему линиями.
+   * Обсуждения на объекте остаются там, где он был: булавка отцепляется и встаёт в точку доски.
+   */
   remove(id: string): void {
     const item = this.byId.get(id);
     if (!item) return;
     this.write(() => {
       for (const lineId of this.linesOf(id)) this.remove(lineId);
+      if (!isLine(item)) {
+        for (const t of this.doc.comments) {
+          if (t.item !== id) continue;
+          this.updateThread(t.id, (cur) => {
+            const next = { ...cur, x: item.x + (cur.fx ?? 0) * item.w, y: item.y + (cur.fy ?? 0) * item.h };
+            delete next.item;
+            delete next.fx;
+            delete next.fy;
+            return next;
+          });
+        }
+      }
       this.run({ t: 'delete', index: this.indexOf(id), item });
     });
+  }
+
+  // ---------- обсуждения ----------
+
+  get threads(): readonly CommentThread[] {
+    return this.doc.comments;
+  }
+
+  thread(id: string): CommentThread | undefined {
+    return this.doc.comments.find((t) => t.id === id);
+  }
+
+  addThread(thread: CommentThread): void {
+    this.run({ t: 'thread', index: this.doc.comments.length, before: null, after: thread });
+  }
+
+  updateThread(id: string, change: (t: CommentThread) => CommentThread): void {
+    const index = this.doc.comments.findIndex((t) => t.id === id);
+    if (index < 0) return;
+    const before = this.doc.comments[index];
+    const after = change(before);
+    if (after !== before) this.run({ t: 'thread', index, before, after });
+  }
+
+  removeThread(id: string): void {
+    const index = this.doc.comments.findIndex((t) => t.id === id);
+    if (index >= 0) this.run({ t: 'thread', index, before: this.doc.comments[index], after: null });
   }
 
   update<T extends Item>(id: string, change: Partial<T> | ((item: T) => T)): void {
@@ -357,6 +411,11 @@ export class BoardStore {
       case 'prop':
         if (op.after === undefined) delete this.doc[op.key];
         else (this.doc as Record<string, unknown>)[op.key] = op.after;
+        break;
+      case 'thread':
+        if (!op.before) this.doc.comments.splice(op.index, 0, op.after!);
+        else if (!op.after) this.doc.comments.splice(op.index, 1);
+        else this.doc.comments[op.index] = op.after;
         break;
       case 'replace':
         items[op.index] = op.after;

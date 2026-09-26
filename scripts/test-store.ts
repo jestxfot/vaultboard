@@ -203,5 +203,35 @@ console.log('\nСлои');
   check(!!back && back.undo.length === 2 && back.redo.length === 1, 'правки слоёв восстанавливаются из журнала на диске');
 }
 
+console.log('\nОбсуждения');
+{
+  const st = new BoardStore(emptyBoard());
+  const lg = attachLog(st);
+  st.transact('Стикер', () => st.insert({ ...makeSticky('s', 0, 0), x: 100, y: 100, w: 200, h: 100 }));
+  const msg = (id: string, text: string) => ({ id, author: 'Я', time: '2026-09-26T10:00:00Z', text });
+  st.transact('Комментарий', () => st.addThread({ id: 't', x: 0, y: 0, item: 's', fx: 0.5, fy: 1, messages: [msg('m1', 'Первое')] }));
+  for (let i = 2; i <= 30; i++) st.transact('Ответ', () => st.updateThread('t', (t) => ({ ...t, messages: [...t.messages, msg(`m${i}`, `Ответ ${i}`)] })));
+  const replyLine = JSON.stringify(lg[lg.length - 1]);
+  check(replyLine.length < 250, `ответ в длинном обсуждении пишется в журнал одним сообщением (${replyLine.length} байт)`);
+  st.transact('Статус', () => st.updateThread('t', (t) => ({ ...t, status: 'done', color: '#ff0000' })));
+  st.transact('Удалить стикер', () => st.remove('s'));
+  const t = st.thread('t')!;
+  check(t.item === undefined && t.x === 200 && t.y === 200, 'удалили объект — булавка осталась на его месте на доске');
+  st.undo();
+  check(st.thread('t')!.item === 's', 'отмена удаления возвращает булавку на объект');
+  st.undo();
+  check(st.thread('t')!.status === undefined, 'статус обсуждения отменяется');
+  st.redo();
+  const back = rebuildHistory(st.doc.items, parseLog(lg.map((l) => JSON.stringify(l)).join('\n')), st.rev, st.threads);
+  check(!!back && back.undo.length === 32 && back.redo.length === 1, 'история обсуждений восстанавливается из журнала на диске');
+  // Отмена по восстановленной истории: откатить всё до пустой доски.
+  const fresh = new BoardStore(JSON.parse(JSON.stringify(st.doc)));
+  fresh.restoreHistory(back!.undo, back!.redo);
+  for (let i = 0; i < 32; i++) fresh.undo();
+  check(fresh.threads.length === 0 && fresh.items.length === 0, 'по журналу с диска отменяется вся цепочка: ответы, обсуждение, стикер');
+  fresh.redo(); fresh.redo();
+  check(fresh.thread('t')?.messages.length === 1, 'и повторяется обратно');
+}
+
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');
 process.exit(failed ? 1 : 0);

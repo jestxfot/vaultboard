@@ -49,7 +49,7 @@ export class BoardSession {
   /** Поднять историю с диска и начать следить за правками. Возвращает, сколько шагов отмены восстановлено. */
   async start(): Promise<number> {
     const text = await vault.readHistory(this.path).catch(() => '');
-    const rebuilt = text ? rebuildHistory(this.store.items, parseLog(text), this.store.rev) : null;
+    const rebuilt = text ? rebuildHistory(this.store.items, parseLog(text), this.store.rev, this.store.threads) : null;
     if (rebuilt) this.store.restoreHistory(rebuilt.undo, rebuilt.redo);
     else this.queueLog({ v: 1, start: this.store.rev });
 

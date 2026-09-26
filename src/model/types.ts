@@ -134,17 +134,33 @@ export interface LayerDef {
 }
 
 export interface CommentMessage {
+  id: string;
   author: string;
+  /** Когда написано, ISO-строкой. */
   time: string;
   text: string;
-  reactions?: Record<string, number>;
+  /** Когда правили, если правили. */
+  edited?: string;
+  /** Реакция → кто её поставил. */
+  reactions?: Record<string, string[]>;
 }
 
+/**
+ * Обсуждение на доске, как в Miro: булавка и сообщения под ней.
+ * Булавка стоит в точке доски; если её поставили на объект — ещё и в доле его ширины и высоты,
+ * тогда она ездит и тянется вместе с ним, а `x`/`y` — запасное место на случай, если объект удалят.
+ */
 export interface CommentThread {
   id: string;
-  at: { item: string; dx: number; dy: number } | { x: number; y: number };
+  x: number;
+  y: number;
+  item?: string;
+  fx?: number;
+  fy?: number;
+  /** Цвет булавки `#rrggbb`. Нет — цвет статуса. */
   color?: string;
-  resolved?: boolean;
+  /** Статус обсуждения (см. model/comments.ts). Нет поля — «открыто». */
+  status?: string;
   messages: CommentMessage[];
 }
 

@@ -46,7 +46,10 @@ export function parseBoard(text: string): BoardDoc {
     format: FORMAT,
     meta: isObject(raw.meta) ? raw.meta : {},
     items,
-    comments: Array.isArray(raw.comments) ? (raw.comments as CommentThread[]) : [],
+    // Обсуждение без места или без списка сообщений показать нельзя — пропускаем его, а не всю доску.
+    comments: Array.isArray(raw.comments)
+      ? (raw.comments as CommentThread[]).filter((t) => isObject(t) && typeof t.id === 'string' && typeof t.x === 'number' && typeof t.y === 'number' && Array.isArray(t.messages))
+      : [],
   };
 }
 

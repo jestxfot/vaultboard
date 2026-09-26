@@ -9,7 +9,7 @@
 // - полноценные фигуры и тексты строятся очередью с лимитом на кадр, чтобы не было рывков.
 //   Пока объект строится, на его месте виден цветной прямоугольник — дыр не бывает;
 // - правки применяются точечно: меняется только тронутый объект и прицепленные к нему линии.
-import { Application, CanvasTextMetrics, Container, Graphics, HTMLText, Rectangle, RenderTexture, Sprite, Text, Texture, TilingSprite } from 'pixi.js';
+import { Application, CanvasTextMetrics, Container, Graphics, HTMLText, Rectangle, RenderTexture, Sprite, Text, Texture, Ticker, TilingSprite } from 'pixi.js';
 import RBush from 'rbush';
 import type { Background, BoardDoc, BoxItem, DocItem, ImageItem, Item, LineItem, LinkItem } from '../model/types.ts';
 import { layerFlags, layerOf } from '../model/layers.ts';
@@ -252,6 +252,14 @@ export class BoardView {
     });
     // Ввод обрабатываем сами, система событий Pixi не нужна: она обходила бы тысячи объектов.
     this.app.stage.eventMode = 'none';
+    // Свои часы Pixi крутят пустой цикл кадров без остановки (60+ раз в секунду — для наведения мыши
+    // в его системе событий, которой мы не пользуемся). Доска рисуется только по требованию — часы не нужны:
+    // без них вкладка в покое не тратит процессор вовсе.
+    for (const ticker of [Ticker.system, Ticker.shared, this.app.ticker]) {
+      if (!ticker) continue;
+      ticker.autoStart = false;
+      ticker.stop();
+    }
     this.host.appendChild(this.app.canvas);
 
     let maxTexture = 4096;
@@ -365,6 +373,9 @@ export class BoardView {
         this.rects.delete(op.item.id);
         touched.delete(op.item.id);
         for (const lineId of this.linesOf(op.item.id)) touched.add(lineId);
+      } else if (op.t === 'thread') {
+        // Обсуждения рисует не холст, а слой булавок поверх него.
+        continue;
       } else {
         const old = this.views.get(op.after.id);
         if (!old) continue;
@@ -1251,6 +1262,15 @@ export class BoardView {
     v.body = body;
     v.bodyRes = res;
     v.container.addChild(body);
+    this.redrawSoon();
+  }
+
+  /**
+   * Текст документа (HTMLText) Pixi готовит асинхронно, картинкой через браузер, и сам кадр не просит.
+   * Раз постоянного цикла кадров нет, через немного перерисовываем сами — готовый текст появится, даже если камера стоит.
+   */
+  private redrawSoon(): void {
+    for (const ms of [80, 250, 700]) window.setTimeout(() => this.requestFrame(), ms);
   }
 
   /** Заголовок рамки всегда одного размера на экране, как в Miro. */
@@ -1320,6 +1340,7 @@ export class BoardView {
           if (v.body && this.visible.has(v)) {
             v.body.resolution = res;
             v.bodyRes = res;
+            this.redrawSoon();
           }
         });
       }
