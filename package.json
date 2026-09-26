@@ -1,0 +1,35 @@
+{
+  "name": "vaultboard",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Open-source Miro-like board over a local folder of files",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "tsc --noEmit",
+    "test": "node scripts/test-format.ts && node scripts/test-store.ts"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
+    "@lezer/highlight": "^1.2.4",
+    "markdown-it": "^15.0.2",
+    "pixi.js": "^8.21.0",
+    "rbush": "^4.0.1",
+    "solid-js": "^1.9.15"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
+    "@types/node": "^26.6.3",
+    "@types/rbush": "^4.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vite-plugin-solid": "^2.11.14"
+  }
+}
