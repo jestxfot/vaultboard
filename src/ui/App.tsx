@@ -415,7 +415,20 @@ export function App() {
 
   async function runExport(area: Rect, scale: number, format: ExportFormat, onProgress: (done: number, total: number) => void) {
     const v = view()!;
-    const result = await exportBoard({ renderTile: (r, s, w, h) => v.renderTile(r, s, w, h), background: v.backgroundColor }, area, scale, format, onProgress);
+    const result = await exportBoard(
+      {
+        renderTile: (r, s, w, h) => v.renderTile(r, s, w, h),
+        renderPixels: (r, s, w, h) => v.renderPixels(r, s, w, h),
+        hasContent: (r) => v.hasContent(r),
+        begin: () => v.beginExport(),
+        end: () => v.endExport(),
+        background: v.backgroundColor,
+      },
+      area,
+      scale,
+      format,
+      onProgress,
+    );
     const base = (current() || 'доска').replace(/\/доска\.board$/i, '').split('/').pop()!.replace(/\.board$/i, '');
     const how = await saveBlob(result.blob, `${base}.${format}`);
     if (how !== 'cancelled') flash(`Экспорт: ${result.width}×${result.height}, ${(result.blob.size / 1024 / 1024).toFixed(1)} МБ${how === 'downloaded' ? ' — в папке загрузок' : ''}`);

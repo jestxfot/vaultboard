@@ -26,6 +26,13 @@ const STRIP_BYTES = 96 * 1024 * 1024;
 export interface ExportTarget {
   /** Нарисовать кусок доски `rect` в масштабе `scale` на холст размером `w×h`. */
   renderTile(rect: Rect, scale: number, w: number, h: number): Promise<HTMLCanvasElement | OffscreenCanvas>;
+  /** То же сразу пикселями RGBA (без холста — меньше копирований). Нет — возьмём с холста. */
+  renderPixels?(rect: Rect, scale: number, w: number, h: number): Promise<Uint8ClampedArray>;
+  /** Есть ли в куске что рисовать; пустой кусок — просто фон. */
+  hasContent?(rect: Rect): boolean;
+  /** Экспорт начался / закончился (камера уходит с экрана один раз, а не на каждую плитку). */
+  begin?(): void;
+  end?(): void;
   background: string;
 }
 
@@ -56,10 +63,24 @@ export async function exportBoard(
   onProgress?: (done: number, total: number) => void,
 ): Promise<ExportResult> {
   const p = plan(rect, scale, format);
-  if (format !== 'jpg') {
-    const blob = await exportStream(target, rect, p, format, onProgress);
-    return { blob, width: p.width, height: p.height, scale: p.scale, reduced: p.reduced };
+  target.begin?.();
+  try {
+    if (format !== 'jpg') {
+      const blob = await exportStream(target, rect, p, format, onProgress);
+      return { blob, width: p.width, height: p.height, scale: p.scale, reduced: p.reduced };
+    }
+    return await exportJpg(target, rect, p, onProgress);
+  } finally {
+    target.end?.();
   }
+}
+
+async function exportJpg(
+  target: ExportTarget,
+  rect: Rect,
+  p: { width: number; height: number; scale: number; reduced: boolean },
+  onProgress?: (done: number, total: number) => void,
+): Promise<ExportResult> {
   const out = document.createElement('canvas');
   out.width = p.width;
   out.height = p.height;
@@ -74,8 +95,11 @@ export async function exportBoard(
       const px = c * TILE, py = r * TILE;
       const w = Math.min(TILE, p.width - px), h = Math.min(TILE, p.height - py);
       const tileRect = { x: rect.x + px / p.scale, y: rect.y + py / p.scale, w: w / p.scale, h: h / p.scale };
-      const tile = await target.renderTile(tileRect, p.scale, w, h);
-      ctx.drawImage(tile as CanvasImageSource, px, py);
+      // Пустой кусок уже залит фоном.
+      if (target.hasContent?.(around(tileRect, p.scale)) ?? true) {
+        const tile = await target.renderTile(tileRect, p.scale, w, h);
+        ctx.drawImage(tile as CanvasImageSource, px, py);
+      }
       onProgress?.(++done, cols * rows);
     }
   }
@@ -84,6 +108,15 @@ export async function exportBoard(
     out.toBlob((b) => (b ? resolve(b) : reject(new Error('Браузер не смог собрать картинку'))), 'image/jpeg', 1),
   );
   return { blob, width: p.width, height: p.height, scale: p.scale, reduced: p.reduced };
+}
+
+/**
+ * Кусок с запасом: заголовок рамки, толстая линия или тень могут выступать за границы объекта,
+ * поэтому «пусто» проверяем чуть шире самой плитки (заголовок рамки на мелком масштабе крупнее в координатах доски).
+ */
+function around(r: Rect, scale: number): Rect {
+  const m = 40 + 40 / scale;
+  return { x: r.x - m, y: r.y - m, w: r.w + m * 2, h: r.h + m * 2 };
 }
 
 // ---------- потоковая запись PNG и PDF ----------
@@ -152,6 +185,8 @@ async function* strips(
 ): AsyncGenerator<{ rgba: Uint8ClampedArray; rows: number }> {
   const stripH = Math.max(64, Math.min(TILE, Math.floor(STRIP_BYTES / (p.width * 4))));
   const cols = Math.ceil(p.width / TILE), bands = Math.ceil(p.height / stripH);
+  const hex = target.background.replace('#', '');
+  const bg = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16), 255];
   let done = 0;
   for (let b = 0; b < bands; b++) {
     const py = b * stripH;
@@ -161,9 +196,17 @@ async function* strips(
       const px = c * TILE;
       const w = Math.min(TILE, p.width - px);
       const tileRect = { x: rect.x + px / p.scale, y: rect.y + py / p.scale, w: w / p.scale, h: h / p.scale };
-      const tile = await target.renderTile(tileRect, p.scale, w, h);
-      const data = (tile.getContext('2d') as CanvasRenderingContext2D).getImageData(0, 0, w, h).data;
-      for (let y = 0; y < h; y++) rgba.set(data.subarray(y * w * 4, (y + 1) * w * 4), (y * p.width + px) * 4);
+      if (target.hasContent && !target.hasContent(around(tileRect, p.scale))) {
+        // Пустой фон (на таймлайне его много) — залить цветом, видеокарту не трогать.
+        const row = new Uint8ClampedArray(w * 4);
+        for (let i = 0; i < row.length; i += 4) row.set(bg, i);
+        for (let y = 0; y < h; y++) rgba.set(row, (y * p.width + px) * 4);
+      } else {
+        const data = target.renderPixels
+          ? await target.renderPixels(tileRect, p.scale, w, h)
+          : ((await target.renderTile(tileRect, p.scale, w, h)).getContext('2d') as CanvasRenderingContext2D).getImageData(0, 0, w, h).data;
+        for (let y = 0; y < h; y++) rgba.set(data.subarray(y * w * 4, (y + 1) * w * 4), (y * p.width + px) * 4);
+      }
       onProgress?.(++done, cols * bands);
     }
     yield { rgba, rows: h };

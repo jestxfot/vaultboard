@@ -193,6 +193,9 @@ export class BoardView {
   private hiddenLayers = new Set<string>();
   private lockedLayers = new Set<string>();
   private darkBackground = false;
+  /** Камера до экспорта (пока идёт экспорт по плиткам) и до текущей плитки. */
+  private exportSaved: typeof this.cam | null = null;
+  private tileSaved: typeof this.cam = { x: 0, y: 0, zoom: 1 };
   /** Фон доски, у которой он не задан, — фон темы интерфейса (светлой или тёмной). */
   private defaultBackground = '#f7f7f5';
   /** Файл (фото или заметка) → объекты доски, которые его показывают. */
@@ -1443,8 +1446,52 @@ export class BoardView {
    * Нарисовать кусок доски в полной детализации на отдельный холст (для экспорта).
    * Все объекты куска строятся сразу, фото грузятся оригиналами, экран потом возвращается как был.
    */
+  /**
+   * Экспорт по плиткам: камера на время всех плиток уходит с экрана и возвращается один раз в конце.
+   * Иначе после каждой плитки перестраивались бы объекты экрана, а следующая плитка строила свои заново.
+   */
+  beginExport(): void {
+    this.exportSaved ??= { ...this.cam };
+  }
+
+  endExport(): void {
+    if (!this.exportSaved) return;
+    Object.assign(this.cam, this.exportSaved);
+    this.exportSaved = null;
+    this.cameraMoved();
+  }
+
+  /** Есть ли в куске доски что рисовать (пустой фон экспорт заливает цветом, не трогая видеокарту). */
+  hasContent(rect: Rect): boolean {
+    return this.search(rect, true).length > 0;
+  }
+
+  /** Кусок доски картинкой на холсте (для JPG, который браузер сжимает только из холста). */
   async renderTile(rect: Rect, scale: number, w: number, h: number): Promise<HTMLCanvasElement> {
-    const saved = { ...this.cam };
+    const rt = await this.renderTileTexture(rect, scale, w, h);
+    const canvas = this.app.renderer.extract.canvas(rt) as HTMLCanvasElement;
+    rt.destroy(true);
+    this.restoreAfterTile();
+    return canvas;
+  }
+
+  /** Кусок доски сразу пикселями RGBA — без промежуточного холста (для PNG и PDF потоком). */
+  async renderPixels(rect: Rect, scale: number, w: number, h: number): Promise<Uint8ClampedArray> {
+    const rt = await this.renderTileTexture(rect, scale, w, h);
+    const { pixels } = this.app.renderer.extract.pixels(rt);
+    rt.destroy(true);
+    this.restoreAfterTile();
+    return pixels;
+  }
+
+  private restoreAfterTile(): void {
+    if (this.exportSaved) return;
+    Object.assign(this.cam, this.tileSaved);
+    this.cameraMoved();
+  }
+
+  private async renderTileTexture(rect: Rect, scale: number, w: number, h: number): Promise<RenderTexture> {
+    this.tileSaved = { ...this.cam };
     this.cam.zoom = scale;
     this.cam.x = -rect.x * scale;
     this.cam.y = -rect.y * scale;
@@ -1503,12 +1550,7 @@ export class BoardView {
     for (const v of this.visible) if (v.item.kind === 'frame') this.updateDetail(v);
     const rt = RenderTexture.create({ width: w, height: h, resolution: 1 });
     this.app.renderer.render({ container: this.world, target: rt, clear: true, clearColor: this.backgroundColor });
-    const canvas = this.app.renderer.extract.canvas(rt) as HTMLCanvasElement;
-    rt.destroy(true);
-
-    Object.assign(this.cam, saved);
-    this.cameraMoved();
-    return canvas;
+    return rt;
   }
 
   destroy(): void {
