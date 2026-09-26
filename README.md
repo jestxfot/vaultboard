@@ -4,9 +4,11 @@
 
 *An open-source, local-first Miro-like whiteboard. Boards, notes and photos are plain files in a folder you choose. The interface is in Russian.*
 
+![vaultboard: доска с рамкой, рисунком от руки, стикером, текстом и комментарием](docs/screenshot.webp)
+
 ## Быстрый старт (Windows)
 
-1. Скачай архив: [vaultboard-main.zip](https://github.com/jestxfot/vaultboard/archive/refs/heads/main.zip) — или последний релиз на странице [Releases](https://github.com/jestxfot/vaultboard/releases).
+1. Открой [последний релиз](https://github.com/jestxfot/vaultboard/releases/latest) и внизу скачай **Source code (zip)**.
 2. Распакуй его в любую папку.
 3. Дважды щёлкни `vaultboard.vbs`.
 
