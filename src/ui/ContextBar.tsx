@@ -6,7 +6,10 @@ import type { Editor, EditorUi } from '../editor/Editor.ts';
 import type { Align, DashKind, EndCap, ShapeKind } from '../model/types.ts';
 import { STICKY_PALETTE } from '../format/colors.ts';
 import { BASE_FONTS, BUILTIN_FONTS, fontFamily, knownSystemFonts, querySystemFonts } from '../render/fonts.ts';
-import { IconArrowEnd, IconArrowStart, IconBack, IconCurve, IconElbow, IconFront, IconStraight, IconTrash } from './icons.tsx';
+import {
+  IconAlignBottom, IconAlignHCenter, IconAlignLeft, IconAlignRight, IconAlignTop, IconAlignVCenter, IconArrowEnd, IconArrowStart, IconBack, IconCurve,
+  IconDistributeH, IconDistributeV, IconElbow, IconFront, IconGroup, IconStraight, IconTidyColumn, IconTidyRow, IconTrash, IconUngroup,
+} from './icons.tsx';
 
 const WIDTHS = [1, 2, 3, 5, 8];
 const DASHES: { kind: DashKind; title: string; svg: string }[] = [
@@ -33,7 +36,21 @@ const SHAPE_NAMES: Record<ShapeKind, string> = {
 const TEXT_KINDS = ['sticky', 'text', 'card', 'shape'];
 const BORDER_KINDS = ['sticky', 'text', 'card', 'shape', 'frame', 'doc', 'file', 'link'];
 
-type Pop = 'fill' | 'text' | 'border' | null;
+/** Выравнивание: панель остаётся открытой — можно выровнять, потом сразу распределить. */
+const ALIGNS: { title: string; icon: () => JSX.Element; min: number; run: (e: Editor) => void }[] = [
+  { title: 'По левому краю (Alt+A)', icon: IconAlignLeft, min: 2, run: (e) => e.align('left') },
+  { title: 'По центру по горизонтали (Alt+H)', icon: IconAlignHCenter, min: 2, run: (e) => e.align('hcenter') },
+  { title: 'По правому краю (Alt+D)', icon: IconAlignRight, min: 2, run: (e) => e.align('right') },
+  { title: 'По верхнему краю (Alt+W)', icon: IconAlignTop, min: 2, run: (e) => e.align('top') },
+  { title: 'По центру по вертикали (Alt+V)', icon: IconAlignVCenter, min: 2, run: (e) => e.align('vcenter') },
+  { title: 'По нижнему краю (Alt+S)', icon: IconAlignBottom, min: 2, run: (e) => e.align('bottom') },
+  { title: 'Распределить по горизонтали — одинаковые промежутки (Alt+Shift+H)', icon: IconDistributeH, min: 3, run: (e) => e.distribute('x') },
+  { title: 'Распределить по вертикали — одинаковые промежутки (Alt+Shift+V)', icon: IconDistributeV, min: 3, run: (e) => e.distribute('y') },
+  { title: 'Выстроить в ряд с равным шагом', icon: IconTidyRow, min: 2, run: (e) => e.tidy('x') },
+  { title: 'Выстроить в столбец с равным шагом', icon: IconTidyColumn, min: 2, run: (e) => e.tidy('y') },
+];
+
+type Pop = 'fill' | 'text' | 'border' | 'align' | null;
 
 /** Числовое поле: меняется по Enter или при уходе с поля. Пусто — «по умолчанию». */
 function NumberField(props: { value: number | undefined; placeholder: string; title: string; min?: number; onChange: (v: number | undefined) => void }) {
@@ -93,6 +110,7 @@ export function ContextBar(props: {
     return [...new Set(found)].slice(0, 4).map((target) => ({ id: sel.id, target }));
   };
   const file = () => (props.ui.selection.length === 1 ? props.editor.selectedFile() : null);
+  const groups = () => (props.ui, props.editor.groupState());
   let bar: HTMLDivElement | undefined;
   /**
    * Где стоит панель: над видимой частью выделенного и всегда целиком в окне.
@@ -265,6 +283,18 @@ export function ContextBar(props: {
           <Show when={file()}>
             <button class="ctx-text ctx-danger" title="Удалить сам файл с диска — в корзину базы (.trash), как в Obsidian" onClick={() => props.onTrashFile()}>Удалить файл</button>
           </Show>
+          <Show when={groups().units > 1 || groups().canGroup || groups().canUngroup}>
+            <span class="ctx-sep" />
+            <Show when={groups().units > 1}>
+              <button class="ctx-btn" classList={{ active: pop() === 'align' }} title="Выровнять и распределить (Alt+A/D/W/S/H/V)" onClick={() => toggle('align')}><IconAlignLeft /></button>
+            </Show>
+            <Show when={groups().canGroup}>
+              <button class="ctx-btn" title="Сгруппировать (Ctrl+G): двигаются и выделяются вместе" onClick={() => props.editor.group()}><IconGroup /></button>
+            </Show>
+            <Show when={groups().canUngroup}>
+              <button class="ctx-btn" title="Разгруппировать (Ctrl+Shift+G)" onClick={() => props.editor.ungroup()}><IconUngroup /></button>
+            </Show>
+          </Show>
           <span class="ctx-sep" />
           <button class="ctx-btn" title="На передний план (Ctrl+])" onClick={() => props.editor.bringToFront()}><IconFront /></button>
           <button class="ctx-btn" title="На задний план (Ctrl+[)" onClick={() => props.editor.sendToBack()}><IconBack /></button>
@@ -279,6 +309,17 @@ export function ContextBar(props: {
         </Show>
         <Show when={pop() === 'border'}>
           <Swatches colors={INK_COLORS} none onPick={(c) => pick(() => props.editor.setLook({ borderColor: c }))} />
+        </Show>
+        <Show when={pop() === 'align'}>
+          <div class="ctx-align">
+            <For each={ALIGNS}>
+              {(a) => (
+                <button class="ctx-btn" title={a.title} disabled={a.min > groups().units} onClick={() => a.run(props.editor)}>
+                  <a.icon />
+                </button>
+              )}
+            </For>
+          </div>
         </Show>
       </div>
     </Show>

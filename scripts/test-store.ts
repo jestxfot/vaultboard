@@ -10,6 +10,7 @@ import { decodePoints, encodePoints, shiftPoints } from '../src/format/strokes.t
 import { snapRect } from '../src/editor/snap.ts';
 import { resolveLook } from '../src/model/look.ts';
 import { searchBoard } from '../src/editor/search.ts';
+import { alignShifts, distributeShifts, tidyShifts } from '../src/editor/arrange.ts';
 
 let failed = 0;
 function check(ok: boolean, message: string): void {
@@ -249,6 +250,49 @@ console.log('\nПоиск по доске');
   check(ids('елка') === 'c', '«ё» и «е» — одна буква');
   check(ids('ЬСШ') === 'a,b', 'запрос в другой раскладке («ЬСШ» → «MCI»)');
   check(searchBoard(items, 'mci', visible, pos)[1].label === 'Ещё одна MCI заметка', 'подпись найденного — без значков markdown');
+}
+
+console.log('\nВыравнивание и группы');
+{
+  const r = (x: number, y: number, w: number, h: number) => ({ x, y, w, h });
+  const units = [r(0, 0, 100, 50), r(300, 40, 50, 50), r(120, 100, 80, 20)];
+  const moved = (s: { dx: number; dy: number }[]) => units.map((u, i) => ({ ...u, x: u.x + s[i].dx, y: u.y + s[i].dy }));
+  const left = moved(alignShifts(units, 'left'));
+  check(left.every((u) => u.x === 0) && left.map((u) => u.y).join() === '0,40,100', 'по левому краю: x у всех — самый левый, y не меняется');
+  const right = moved(alignShifts(units, 'right'));
+  check(right.every((u) => u.x + u.w === 350), 'по правому краю — самый правый край');
+  const mid = moved(alignShifts(units, 'vcenter'));
+  check(mid.every((u) => u.y + u.h / 2 === 60), 'по середине — центр общей рамки (0…120 → 60)');
+  const dist = moved(distributeShifts(units, 'x'));
+  const byX = [...dist].sort((a, b) => a.x - b.x);
+  const gap1 = byX[1].x - (byX[0].x + byX[0].w), gap2 = byX[2].x - (byX[1].x + byX[1].w);
+  check(Math.abs(gap1 - gap2) < 1e-9 && byX[0].x === 0 && byX[2].x === 300, `распределение: крайние на месте, промежутки равны (${gap1}, ${gap2})`);
+  check(distributeShifts(units.slice(0, 2), 'x').every((s) => s.dx === 0), 'двух объектов для распределения мало — никто не двигается');
+  const tidy = moved(tidyShifts(units, 'x'));
+  const tx = [...tidy].sort((a, b) => a.x - b.x);
+  check(tidy.every((u) => u.y === 0) && tx[1].x - (tx[0].x + tx[0].w) === tx[2].x - (tx[1].x + tx[1].w), 'в ряд: одна верхняя линия, шаг одинаковый');
+
+  // Группа — это просто поле у объектов: правка идёт через историю, отмена снимает группу.
+  const st = new BoardStore(emptyBoard());
+  const log = attachLog(st);
+  st.transact('+', () => {
+    st.insert(makeSticky('a', 0, 0));
+    st.insert(makeSticky('b', 300, 0));
+  });
+  st.transact('Группа', () => {
+    st.update('a', { group: 'g1' });
+    st.update('b', { group: 'g1' });
+  });
+  check(st.get('a')?.group === 'g1' && st.get('b')?.group === 'g1', 'группа записывается в объекты');
+  check(snapshot(st).includes('"group": "g1"') || snapshot(st).includes('"group":"g1"'), 'и сохраняется в файл доски');
+  st.undo();
+  check(!st.get('a')?.group && !st.get('b')?.group, 'Ctrl+Z снимает группу');
+  st.redo();
+  const back = rebuildHistory(st.doc.items, parseLog(log.map((l) => JSON.stringify(l)).join('\n')), st.rev, st.threads);
+  const fresh = new BoardStore(JSON.parse(JSON.stringify(st.doc)));
+  fresh.restoreHistory(back!.undo, back!.redo);
+  fresh.undo();
+  check(!fresh.get('a')?.group, 'и после перезапуска — по журналу с диска');
 }
 
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');

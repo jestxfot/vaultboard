@@ -1,9 +1,9 @@
 // Редактор доски: инструменты, выделение, перетаскивание, размеры, линии, горячие клавиши, буфер обмена.
 //
 // Управление:
-// - левая кнопка по пустому месту — двигать доску; Shift/Ctrl + перетаскивание — выделить рамкой;
-// - левая кнопка по объекту — выделить и тащить; Alt + перетаскивание — тащить копию;
-// - колесо — зум к курсору; средняя/правая кнопка или пробел — тоже двигать доску;
+// - левая кнопка по пустому месту — выделить рамкой (Shift — добавить к выделенному);
+// - левая кнопка по объекту — выделить (вместе с его группой) и тащить; Alt + перетаскивание — тащить копию;
+// - колесо — зум к курсору; правая или средняя кнопка, пробел — двигать доску;
 // - двойной щелчок по пустому месту — текст, по объекту — править его текст.
 // Горячие клавиши работают по физическим клавишам (e.code), поэтому одинаково в русской и английской раскладке.
 import type { Graphics } from 'pixi.js';
@@ -24,6 +24,7 @@ import { recognize } from './recognize.ts';
 import { embedUrl } from '../format/embed.ts';
 import { LINK_COVER, LINK_W } from '../render/BoardView.ts';
 import { type Guide, snapRect, type XEdge, type YEdge } from './snap.ts';
+import { type AlignKind, alignShifts, distributeShifts, tidyShifts } from './arrange.ts';
 import { distToLine, distToSegment, geomPoints, inRect, rectContains, rectFromPoints, rectsIntersect, round2, unionRect } from './hit.ts';
 import { type CloseReason, type EditField, TextEditor } from './TextEditor.ts';
 
@@ -99,7 +100,8 @@ interface PointerState {
 
 type Gesture =
   | { kind: 'pan'; lastX: number; lastY: number; moved: boolean; clearOnClick: boolean; downX: number; downY: number; menu: boolean; clientX: number; clientY: number }
-  | { kind: 'press'; id: string; downX: number; downY: number; start: Point; toggleOff: boolean; alt: boolean }
+  /** `fresh` — объект выделили этим же нажатием (тогда отпускание не «проваливается» внутрь группы). */
+  | { kind: 'press'; id: string; downX: number; downY: number; start: Point; toggleOff: boolean; alt: boolean; fresh: boolean }
   | { kind: 'move'; start: Point; boxes: Map<string, Point>; lines: Map<string, LineItem>; base: Rect | null }
   | { kind: 'marquee'; start: Point; end: Point; base: Set<string> }
   | { kind: 'resize'; handle: Handle; start: Rect; boxes: Map<string, BoxItem>; aspect: boolean }
@@ -440,18 +442,19 @@ export class Editor {
 
     const hit = this.hitTest(w);
     if (hit) {
+      // Объект группы выделяется вместе со всей группой.
       const selected = this.selection.has(hit);
       let toggleOff = false;
       if (p.shift) {
         if (selected) toggleOff = true;
         else {
-          this.selection.add(hit);
+          for (const id of this.unitOf(hit)) this.selection.add(id);
           this.changed();
         }
       } else if (!selected) {
-        this.select([hit]);
+        this.select(this.unitOf(hit));
       }
-      this.gesture = { kind: 'press', id: hit, downX: p.sx, downY: p.sy, start: w, toggleOff, alt: p.alt };
+      this.gesture = { kind: 'press', id: hit, downX: p.sx, downY: p.sy, start: w, toggleOff, alt: p.alt, fresh: !selected };
       return;
     }
 
@@ -553,7 +556,7 @@ export class Editor {
             ids.add(item.id);
           }
         }
-        this.select(ids);
+        this.select(this.withGroups(ids));
         break;
       }
       case 'resize':
@@ -613,17 +616,22 @@ export class Editor {
         if (!g.moved && g.menu) {
           // Меню по объекту: если щёлкнули не по выделенному — выделяем его, как в Miro.
           const hit = this.hitTest(w);
-          if (hit && !this.selection.has(hit)) this.select([hit]);
+          if (hit && !this.selection.has(hit)) this.select(this.unitOf(hit));
           if (!hit && this.selection.size) this.select([]);
           this.onContextMenu?.({ clientX: g.clientX, clientY: g.clientY, at: w, target: hit });
         }
         break;
       case 'press': {
         if (g.toggleOff) {
+          for (const id of this.unitOf(g.id)) this.selection.delete(id);
           this.selection.delete(g.id);
           this.changed();
-        } else if (!p.shift && this.selection.size > 1) {
-          this.select([g.id]);
+        } else if (!p.shift && !g.fresh && this.selection.size > 1) {
+          // Щелчок по уже выделенному: если выделена ровно его группа — «провалиться» к одному объекту
+          // (поправить его внутри группы), иначе оставить выделенной только его группу.
+          const unit = this.unitOf(g.id);
+          const onlyUnit = unit.length > 1 && unit.length === this.selection.size && unit.every((id) => this.selection.has(id));
+          this.select(onlyUnit ? [g.id] : unit);
         }
         // Щелчок по видео запускает его прямо на доске; перетаскивание по-прежнему двигает карточку.
         const item = this.store.get(g.id);
@@ -1632,7 +1640,7 @@ export class Editor {
         ids.push(item.id);
       }
     }
-    this.select(ids);
+    this.select(this.withGroups(ids));
     this.setTool('select');
   }
 
@@ -1692,11 +1700,22 @@ export class Editor {
       }
       return { x: round2(ep.x + dx), y: round2(ep.y + dy) };
     };
+    // Копия группы — новая группа, а не новые члены старой.
+    // Скопировали один объект из группы — копия ни в какой группе не состоит.
+    const count = new Map<string, number>();
+    for (const item of items) if (item.group) count.set(item.group, (count.get(item.group) ?? 0) + 1);
+    const groups = new Map<string, string | undefined>();
+    for (const [g, n] of count) groups.set(g, n > 1 ? this.id() : undefined);
     for (const item of items) {
       const id = map.get(item.id)!;
       const copy: Item = isLine(item)
         ? { ...item, id, from: remap(item.from, item, 'from'), to: remap(item.to, item, 'to') }
         : { ...item, id, x: round2(item.x + dx), y: round2(item.y + dy) };
+      if (item.group) {
+        const g = groups.get(item.group);
+        if (g) copy.group = g;
+        else delete copy.group;
+      }
       this.store.insert(copy, copy.kind === 'frame' ? 0 : undefined);
       out.push(id);
     }
@@ -1974,6 +1993,189 @@ export class Editor {
     }
   }
 
+  // ---------- группы ----------
+
+  /** Объект вместе со всей своей группой (то, что из неё сейчас можно выделить). */
+  private unitOf(id: string): string[] {
+    const item = this.store.get(id);
+    if (!item?.group) return [id];
+    const g = item.group;
+    const ids = this.store.items.filter((i) => i.group === g && this.pickable(i)).map((i) => i.id);
+    return ids.length ? ids : [id];
+  }
+
+  /** Дополнить набор объектов их группами целиком (для рамки выделения и лассо). */
+  private withGroups(ids: Iterable<string>): string[] {
+    const set = new Set(ids);
+    const groups = new Set<string>();
+    for (const id of set) {
+      const g = this.store.get(id)?.group;
+      if (g) groups.add(g);
+    }
+    if (groups.size) for (const i of this.store.items) if (i.group && groups.has(i.group) && this.pickable(i)) set.add(i.id);
+    return [...set];
+  }
+
+  /**
+   * Единицы выделенного для выравнивания: каждая группа — одна единица, остальное — по объекту.
+   * Рамка единицы — по её объектам (линии в рамку не входят, но едут вместе с единицей).
+   * Закреплённое не двигается и в расчёт не берётся.
+   */
+  private selectionUnits(): { ids: string[]; rect: Rect }[] {
+    const byKey = new Map<string, string[]>();
+    for (const id of this.selection) {
+      const item = this.store.get(id);
+      if (!item) continue;
+      const key = item.group ? `g:${item.group}` : id;
+      let list = byKey.get(key);
+      if (!list) byKey.set(key, (list = []));
+      list.push(id);
+    }
+    const units: { ids: string[]; rect: Rect }[] = [];
+    for (const ids of byKey.values()) {
+      const items = ids.map((id) => this.store.get(id)!);
+      if (items.some((i) => i.locked)) continue;
+      const rect = unionRect(items.filter(isBox).map((b) => this.view.rectOf(b.id)).filter((r): r is Rect => !!r));
+      if (rect) units.push({ ids, rect });
+    }
+    return units;
+  }
+
+  /** Что можно сделать с группами у выделенного. */
+  groupState(): { canGroup: boolean; canUngroup: boolean; units: number } {
+    const items = [...this.selection].map((id) => this.store.get(id)).filter((i): i is Item => !!i);
+    const groups = new Set(items.map((i) => i.group));
+    const oneGroup = groups.size === 1 && !groups.has(undefined);
+    return {
+      canGroup: items.length > 1 && !oneGroup,
+      canUngroup: items.some((i) => i.group),
+      units: this.selectionUnits().length,
+    };
+  }
+
+  /** Сгруппировать выделенное (Ctrl+G). Выделенные группы вливаются в новую. */
+  group(): void {
+    const ids = [...this.selection].filter((id) => this.store.has(id));
+    if (ids.length < 2) return;
+    const gid = this.id();
+    const touched = new Set<string>();
+    this.store.transact('Группа', () => {
+      for (const id of ids) {
+        const old = this.store.get(id)!.group;
+        if (old) touched.add(old);
+        this.store.update(id, { group: gid });
+      }
+      this.dropLoneGroups(touched);
+    });
+    this.select(ids);
+    this.onNotice?.('Сгруппировано: щелчок выделяет всю группу, повторный — один объект в ней. Разгруппировать — Ctrl+Shift+G');
+  }
+
+  /** Разгруппировать выделенное (Ctrl+Shift+G). */
+  ungroup(): void {
+    const ids = [...this.selection].filter((id) => this.store.get(id)?.group);
+    if (!ids.length) return;
+    const touched = new Set(ids.map((id) => this.store.get(id)!.group!));
+    this.store.transact('Разгруппировать', () => {
+      for (const id of ids) {
+        this.store.update(id, (item) => {
+          const next = { ...item };
+          delete next.group;
+          return next;
+        });
+      }
+      this.dropLoneGroups(touched);
+    });
+    this.changed();
+  }
+
+  /** Группа, от которой остался один объект, — уже не группа. */
+  private dropLoneGroups(groups: Set<string>): void {
+    if (!groups.size) return;
+    const members = new Map<string, string[]>();
+    for (const i of this.store.items) {
+      if (!i.group || !groups.has(i.group)) continue;
+      let list = members.get(i.group);
+      if (!list) members.set(i.group, (list = []));
+      list.push(i.id);
+    }
+    for (const list of members.values()) {
+      if (list.length !== 1) continue;
+      this.store.update(list[0], (item) => {
+        const next = { ...item };
+        delete next.group;
+        return next;
+      });
+    }
+  }
+
+  // ---------- выравнивание ----------
+
+  /** Выровнять выделенное по краю или центру (группы — целиком). */
+  align(kind: AlignKind): void {
+    const units = this.selectionUnits();
+    if (units.length < 2) return;
+    this.shiftUnits('Выравнивание', units, alignShifts(units.map((u) => u.rect), kind));
+  }
+
+  /** Распределить равномерно: одинаковые промежутки между соседями, крайние на месте. */
+  distribute(axis: 'x' | 'y'): void {
+    const units = this.selectionUnits();
+    if (units.length < 3) {
+      this.onNotice?.('Распределять имеет смысл от трёх объектов');
+      return;
+    }
+    this.shiftUnits('Распределение', units, distributeShifts(units.map((u) => u.rect), axis));
+  }
+
+  /** Выстроить в ровный ряд или столбец с одинаковым шагом. */
+  tidy(axis: 'x' | 'y'): void {
+    const units = this.selectionUnits();
+    if (units.length < 2) return;
+    this.shiftUnits(axis === 'x' ? 'В ряд' : 'В столбец', units, tidyShifts(units.map((u) => u.rect), axis));
+  }
+
+  /**
+   * Сдвинуть единицы: объекты, содержимое рамок (как при перетаскивании) и свободные концы линий.
+   * Прицепленные концы линий едут сами — они следуют за своими объектами.
+   */
+  private shiftUnits(label: string, units: { ids: string[] }[], shifts: { dx: number; dy: number }[]): void {
+    const boxes = new Map<string, { dx: number; dy: number }>();
+    const lines = new Map<string, { dx: number; dy: number }>();
+    units.forEach((u, k) => {
+      const d = shifts[k];
+      if (Math.abs(d.dx) < 0.005 && Math.abs(d.dy) < 0.005) return;
+      for (const id of u.ids) {
+        const item = this.store.get(id);
+        if (!item || item.locked) continue;
+        if (isLine(item)) lines.set(id, d);
+        else {
+          boxes.set(id, d);
+          if (item.kind === 'frame') {
+            const fi = this.store.indexOf(id);
+            for (const inner of this.view.search(item)) {
+              if (!boxes.has(inner.id) && !isLine(inner) && !inner.locked && this.store.indexOf(inner.id) > fi && rectContains(item, inner)) boxes.set(inner.id, d);
+            }
+          }
+        }
+      }
+    });
+    for (const [id, d] of boxes) for (const lineId of this.store.linesOf(id)) if (!lines.has(lineId)) lines.set(lineId, d);
+    if (!boxes.size && !lines.size) return;
+    const move = (ep: Endpoint, d: { dx: number; dy: number }): Endpoint => ('item' in ep ? ep : { x: round2(ep.x + d.dx), y: round2(ep.y + d.dy) });
+    this.store.transact(label, () => {
+      for (const [id, d] of boxes) {
+        const b = this.store.get(id) as BoxItem;
+        this.store.update<BoxItem>(id, { x: round2(b.x + d.dx), y: round2(b.y + d.dy) });
+      }
+      for (const [id, d] of lines) {
+        const l = this.store.get(id) as LineItem | undefined;
+        if (!l || ('item' in l.from && 'item' in l.to)) continue;
+        this.store.update<LineItem>(id, { from: move(l.from, d), to: move(l.to, d) });
+      }
+    });
+  }
+
   /** Замок: закреплённый объект не двигается и не меняет размер, пока его не открепят. */
   toggleLock(): void {
     const items = [...this.selection].map((id) => this.store.get(id)).filter((i): i is Item => !!i);
@@ -2164,6 +2366,7 @@ export class Editor {
       else if (code === 'KeyF') { handled(); this.onSearch?.(); }
       else if (code === 'KeyB' && this.selection.size) { handled(); this.toggleFormat('bold'); }
       else if (code === 'KeyI' && this.selection.size) { handled(); this.toggleFormat('italic'); }
+      else if (code === 'KeyG') { handled(); if (e.shiftKey) this.ungroup(); else this.group(); }
       else if (code === 'BracketRight') { handled(); this.bringToFront(); }
       else if (code === 'BracketLeft') { handled(); this.sendToBack(); }
       else if (code === 'Equal' || code === 'NumpadAdd') { handled(); this.zoomCenter(1.25); }
@@ -2176,6 +2379,17 @@ export class Editor {
       if (name && this.selection.size) {
         handled();
         this.applyStyle(name);
+        return;
+      }
+      // Выравнивание — те же клавиши, что в Miro: Alt+A/D/W/S — края, Alt+H/V — центры,
+      // Alt+Shift+H/V — распределить.
+      const ALIGN: Record<string, AlignKind> = { KeyA: 'left', KeyD: 'right', KeyW: 'top', KeyS: 'bottom', KeyH: 'hcenter', KeyV: 'vcenter' };
+      if (this.selection.size > 1 && e.shiftKey && (code === 'KeyH' || code === 'KeyV')) {
+        handled();
+        this.distribute(code === 'KeyH' ? 'x' : 'y');
+      } else if (this.selection.size > 1 && ALIGN[code]) {
+        handled();
+        this.align(ALIGN[code]);
       }
       return;
     }
@@ -2282,15 +2496,56 @@ export class Editor {
       g.stroke({ width, color: BLUE, alpha });
     };
 
-    // Подсветка под курсором.
+    /** Рамка группы — пунктиром, чтобы отличалась от рамки выделения. */
+    const groupOutline = (r: Rect, alpha: number) => {
+      const s = this.toScreenRect(r);
+      const x0 = s.x - 5, y0 = s.y - 5, x1 = s.x + s.w + 5, y1 = s.y + s.h + 5;
+      const dash = (ax: number, ay: number, bx: number, by: number) => {
+        const len = Math.hypot(bx - ax, by - ay);
+        for (let t = 0; t < len; t += 10) {
+          const e = Math.min(len, t + 6);
+          g.moveTo(ax + ((bx - ax) * t) / len, ay + ((by - ay) * t) / len).lineTo(ax + ((bx - ax) * e) / len, ay + ((by - ay) * e) / len);
+        }
+      };
+      dash(x0, y0, x1, y0);
+      dash(x1, y0, x1, y1);
+      dash(x1, y1, x0, y1);
+      dash(x0, y1, x0, y0);
+      g.stroke({ width: 1.5, color: BLUE, alpha });
+    };
+    /** Рамки нужных групп — одним проходом по доске, сколько бы групп ни было выделено. */
+    const groupRects = (gids: Set<string>): Rect[] => {
+      if (!gids.size) return [];
+      const rects = new Map<string, Rect[]>();
+      for (const i of this.store.items) {
+        if (!i.group || !gids.has(i.group) || isLine(i) || this.view.isHidden(i)) continue;
+        const r = this.view.rectOf(i.id);
+        if (!r) continue;
+        let list = rects.get(i.group);
+        if (!list) rects.set(i.group, (list = []));
+        list.push(r);
+      }
+      return [...rects.values()].map((list) => unionRect(list)!);
+    };
+
+    // Подсветка под курсором: у объекта группы — ещё и рамка всей группы.
     if (this.hover && !this.selection.has(this.hover) && !this.gesture) {
       const item = this.store.get(this.hover);
       if (item && isLine(item)) strokeLine(item, 2, 0.5);
       else if (item) outline(item.kind === 'frame' ? { ...item } : item, 1.5, 0.8);
+      if (item?.group) for (const r of groupRects(new Set([item.group]))) groupOutline(r, 0.7);
     }
 
-    // Выделение.
+    // Выделение. Группы, попавшие в выделение, обведены пунктиром.
     const boxes = this.selectedBoxes();
+    if (!this.gesture || this.gesture.kind === 'press') {
+      const groups = new Set<string>();
+      for (const id of this.selection) {
+        const gid = this.store.get(id)?.group;
+        if (gid) groups.add(gid);
+      }
+      for (const r of groupRects(groups)) groupOutline(r, 0.9);
+    }
     for (const b of boxes) outline(b, boxes.length === 1 ? 2 : 1, boxes.length === 1 ? 1 : 0.6);
     for (const id of this.selection) {
       const item = this.store.get(id);

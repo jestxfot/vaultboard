@@ -587,6 +587,32 @@ export function App() {
       { label: 'На задний план', hint: 'Ctrl+[', action: () => ed.sendToBack() },
       { label: ui.selection.every((id) => opened!.store.get(id)?.locked) ? 'Открепить' : 'Закрепить', action: () => ed.toggleLock() },
       'sep',
+    );
+    const gs = ed.groupState();
+    if (gs.canGroup) items.push({ label: 'Сгруппировать', hint: 'Ctrl+G', action: () => ed.group() });
+    if (gs.canUngroup) items.push({ label: 'Разгруппировать', hint: 'Ctrl+Shift+G', action: () => ed.ungroup() });
+    if (gs.units > 1) {
+      items.push({
+        label: 'Выровнять',
+        submenu: [
+          { label: 'По левому краю', hint: 'Alt+A', action: () => ed.align('left') },
+          { label: 'По центру', hint: 'Alt+H', action: () => ed.align('hcenter') },
+          { label: 'По правому краю', hint: 'Alt+D', action: () => ed.align('right') },
+          'sep',
+          { label: 'По верхнему краю', hint: 'Alt+W', action: () => ed.align('top') },
+          { label: 'По середине', hint: 'Alt+V', action: () => ed.align('vcenter') },
+          { label: 'По нижнему краю', hint: 'Alt+S', action: () => ed.align('bottom') },
+          'sep',
+          { label: 'Распределить по горизонтали', hint: 'Alt+Shift+H', disabled: gs.units < 3, action: () => ed.distribute('x') },
+          { label: 'Распределить по вертикали', hint: 'Alt+Shift+V', disabled: gs.units < 3, action: () => ed.distribute('y') },
+          'sep',
+          { label: 'Выстроить в ряд', action: () => ed.tidy('x') },
+          { label: 'Выстроить в столбец', action: () => ed.tidy('y') },
+        ],
+      });
+    }
+    if (gs.canGroup || gs.canUngroup || gs.units > 1) items.push('sep');
+    items.push(
       { label: 'Стиль', submenu: styleSubmenu() },
       { label: 'На слой', submenu: layerSubmenu() },
     );

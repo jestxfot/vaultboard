@@ -27,3 +27,15 @@ export const IconPhoto = () => <Svg><rect x="3" y="4" width="14" height="12" rx=
 export const IconDoc = () => <Svg><path d="M5 3h7l3 3v11H5z" /><path d="M12 3v3h3M8 10h5M8 13h5" /></Svg>;
 export const IconPen = () => <Svg><path d="M4 16l1-4 8-8 3 3-8 8z" /><path d="M11 6l3 3" /></Svg>;
 export const IconComment = () => <Svg><path d="M4 16V9a6 6 0 1 1 6 6H4Z" /><path d="M8 8h5M8 11h3" /></Svg>;
+export const IconGroup = () => <Svg><rect x="3" y="3" width="14" height="14" rx="1.5" stroke-dasharray="2.5 2" /><rect x="6" y="6" width="5" height="4" rx=".6" /><rect x="9" y="11" width="5" height="3.5" rx=".6" /></Svg>;
+export const IconUngroup = () => <Svg><rect x="3" y="3" width="7" height="6" rx="1" /><rect x="10" y="11" width="7" height="6" rx="1" /></Svg>;
+export const IconAlignLeft = () => <Svg><path d="M3 3v14" /><rect x="5" y="5" width="10" height="3.5" rx=".8" /><rect x="5" y="11.5" width="6" height="3.5" rx=".8" /></Svg>;
+export const IconAlignHCenter = () => <Svg><path d="M10 2v16" /><rect x="4" y="5" width="12" height="3.5" rx=".8" /><rect x="6.5" y="11.5" width="7" height="3.5" rx=".8" /></Svg>;
+export const IconAlignRight = () => <Svg><path d="M17 3v14" /><rect x="5" y="5" width="10" height="3.5" rx=".8" /><rect x="9" y="11.5" width="6" height="3.5" rx=".8" /></Svg>;
+export const IconAlignTop = () => <Svg><path d="M3 3h14" /><rect x="5" y="5" width="3.5" height="10" rx=".8" /><rect x="11.5" y="5" width="3.5" height="6" rx=".8" /></Svg>;
+export const IconAlignVCenter = () => <Svg><path d="M2 10h16" /><rect x="5" y="4" width="3.5" height="12" rx=".8" /><rect x="11.5" y="6.5" width="3.5" height="7" rx=".8" /></Svg>;
+export const IconAlignBottom = () => <Svg><path d="M3 17h14" /><rect x="5" y="5" width="3.5" height="10" rx=".8" /><rect x="11.5" y="9" width="3.5" height="6" rx=".8" /></Svg>;
+export const IconDistributeH = () => <Svg><path d="M3 3v14M17 3v14" /><rect x="7.5" y="6" width="5" height="8" rx=".8" /></Svg>;
+export const IconDistributeV = () => <Svg><path d="M3 3h14M3 17h14" /><rect x="6" y="7.5" width="8" height="5" rx=".8" /></Svg>;
+export const IconTidyRow = () => <Svg><rect x="2.5" y="7" width="4" height="6" rx=".8" /><rect x="8" y="7" width="4" height="6" rx=".8" /><rect x="13.5" y="7" width="4" height="6" rx=".8" /></Svg>;
+export const IconTidyColumn = () => <Svg><rect x="7" y="2.5" width="6" height="4" rx=".8" /><rect x="7" y="8" width="6" height="4" rx=".8" /><rect x="7" y="13.5" width="6" height="4" rx=".8" /></Svg>;
