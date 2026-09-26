@@ -3,7 +3,7 @@
 import { createSignal, For, Show } from 'solid-js';
 import type { Editor, EditorUi } from '../editor/Editor.ts';
 import type { StyleDef } from '../model/types.ts';
-import { FONTS } from '../render/draw.ts';
+import { fontFamily } from '../render/fonts.ts';
 
 function Preview(props: { def: StyleDef }) {
   const d = () => props.def;
@@ -25,7 +25,7 @@ function Preview(props: { def: StyleDef }) {
           background: d().color ?? '#ffffff',
           color: d().textColor ?? '#1f1f1f',
           border: `${Math.min(d().borderWidth ?? 1, 4)}px solid ${d().borderColor ?? '#d4d4d4'}`,
-          'font-family': FONTS[d().font ?? 'sans'],
+          'font-family': fontFamily(d().font),
           'font-weight': d().bold ? 700 : 400,
           'font-style': d().italic ? 'italic' : 'normal',
         }}

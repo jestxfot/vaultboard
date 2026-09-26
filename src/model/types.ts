@@ -25,7 +25,8 @@ export interface Look {
   textColor?: string;
   /** Размер шрифта. У стикера и фигуры без него шрифт подбирается под размер, как в Miro. */
   fontSize?: number;
-  font?: FontKind;
+  /** Шрифт: базовый ключ (sans, serif, mono, hand) или имя встроенного / системного шрифта. */
+  font?: string;
   align?: Align;
   bold?: boolean;
   italic?: boolean;

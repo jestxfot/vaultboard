@@ -22,6 +22,7 @@ import type { Op } from '../model/store.ts';
 import type { PerfMonitor } from '../perf/monitor.ts';
 import { dashPattern, dashPolyline, drawBox, drawLine, farColor, FONT, labelSpec, type LabelSpec, makeLabel } from './draw.ts';
 import { ImageCache, type Level } from './images.ts';
+import { ensureFont } from './fonts.ts';
 import { endpointCenter, geomBounds, type LineGeom, lineGeometry, lineMidpoint, type Rect, resolveAnchor, samplePath } from './geometry.ts';
 
 export interface Camera {
@@ -451,6 +452,21 @@ export class BoardView {
     v.body = null;
   }
 
+  /** Шрифт загрузился — перерисовать все надписи им. */
+  private refreshFont(font: string): void {
+    for (const v of this.views.values()) {
+      if (isLine(v.item) || this.look(v.item).font !== font) continue;
+      if (v.label) {
+        v.label.destroy();
+        v.label = null;
+        this.labelCount--;
+      }
+      this.dropSnapshot(v);
+      if (this.visible.has(v)) this.updateDetail(v);
+    }
+    this.requestFrame();
+  }
+
   private dropSnapshot(v: ItemView): void {
     if (!v.snapshot) return;
     if (v.far && v.far.texture === v.snapshot) {
@@ -491,7 +507,12 @@ export class BoardView {
 
   private newView(item: Item): ItemView {
     const v = new ItemView(item);
-    v.spec = isLine(item) ? null : labelSpec(this.look(item));
+    const look = this.look(item);
+    v.spec = isLine(look) ? null : labelSpec(look);
+    // Шрифт ещё грузится — текст нарисуется запасным, а когда шрифт придёт, перерисуем надписи с ним.
+    const font = isLine(look) ? undefined : look.font;
+    const wait = ensureFont(font);
+    if (wait && font) void wait.then(() => this.refreshFont(font));
     this.views.set(item.id, v);
     if (item.kind === 'image' || item.kind === 'doc') {
       const file = this.paths.toVault(item.file);

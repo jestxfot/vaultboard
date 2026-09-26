@@ -3,8 +3,9 @@
 // Пока идёт набор текста, панель остаётся: «Ж» и «К» тогда оформляют выделенный кусок текста.
 import { createSignal, For, type JSX, Show } from 'solid-js';
 import type { Editor, EditorUi } from '../editor/Editor.ts';
-import type { Align, DashKind, EndCap, FontKind, ShapeKind } from '../model/types.ts';
+import type { Align, DashKind, EndCap, ShapeKind } from '../model/types.ts';
 import { STICKY_PALETTE } from '../format/colors.ts';
+import { BASE_FONTS, BUILTIN_FONTS, fontFamily, knownSystemFonts, querySystemFonts } from '../render/fonts.ts';
 import { IconArrowEnd, IconArrowStart, IconBack, IconCurve, IconElbow, IconFront, IconStraight, IconTrash } from './icons.tsx';
 
 const WIDTHS = [1, 2, 3, 5, 8];
@@ -21,7 +22,6 @@ const CAPS: { cap: EndCap; label: string }[] = [
   { cap: 'dot', label: 'точка' },
   { cap: 'diamond', label: 'ромб' },
 ];
-const FONT_NAMES: Record<FontKind, string> = { sans: 'Обычный', serif: 'С засечками', mono: 'Моноширинный', hand: 'Рукописный' };
 const INK_COLORS = ['#1a1a1a', '#5b5b5b', '#ffffff', '#e93147', '#ec7500', '#e0ac00', '#08b94e', '#00bfbc', '#4262ff', '#7852ee', '#b04fc8', '#8a5a2b'];
 const LINE_COLORS = ['#1a1a1a', '#5b5b5b', '#e93147', '#ec7500', '#e0ac00', '#08b94e', '#00bfbc', '#4262ff', '#7852ee'];
 
@@ -79,6 +79,7 @@ export function ContextBar(props: {
   onOpenStyles: () => void;
 }) {
   const [pop, setPop] = createSignal<Pop>(null);
+  const [systemFonts, setSystemFonts] = createSignal<string[]>(knownSystemFonts());
   const toggle = (p: Pop) => setPop((cur) => (cur === p ? null : p));
   const kinds = () => props.ui.kinds;
   const only = (k: string) => kinds().length === 1 && kinds()[0] === k;
@@ -133,8 +134,31 @@ export function ContextBar(props: {
         <Show when={anyOf(TEXT_KINDS)}>
           <span class="ctx-sep" />
           <Show when={!props.ui.editing}>
-            <select class="ctx-select" title="Шрифт" value={look()?.font ?? 'sans'} onChange={(e) => props.editor.setLook({ font: e.currentTarget.value as FontKind })}>
-              <For each={Object.entries(FONT_NAMES)}>{([k, name]) => <option value={k}>{name}</option>}</For>
+            <select
+              class="ctx-select ctx-font"
+              title="Шрифт: базовые — есть в Windows везде; встроенные — едут вместе с приложением; шрифты компьютера — только на этом компьютере"
+              value={look()?.font ?? 'sans'}
+              style={{ 'font-family': fontFamily(look()?.font) }}
+              onChange={(e) => {
+                const v = e.currentTarget.value;
+                if (v !== '__system') {
+                  props.editor.setLook({ font: v === 'sans' ? undefined : v });
+                  return;
+                }
+                e.currentTarget.value = look()?.font ?? 'sans';
+                querySystemFonts().then(setSystemFonts, (err: Error) => window.alert(err.message));
+              }}
+            >
+              <optgroup label="Базовые">
+                <For each={Object.entries(BASE_FONTS)}>{([k, f]) => <option value={k} style={{ 'font-family': f.family }}>{f.label}</option>}</For>
+              </optgroup>
+              <optgroup label="Встроенные">
+                <For each={BUILTIN_FONTS}>{(f) => <option value={f} style={{ 'font-family': fontFamily(f) }}>{f}</option>}</For>
+              </optgroup>
+              <optgroup label="Шрифты компьютера">
+                <For each={systemFonts()}>{(f) => <option value={f} style={{ 'font-family': fontFamily(f) }}>{f}</option>}</For>
+                <option value="__system">{systemFonts().length ? 'Обновить список шрифтов компьютера…' : 'Показать шрифты компьютера…'}</option>
+              </optgroup>
             </select>
             <NumberField
               value={look()?.fontSize}

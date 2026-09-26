@@ -10,6 +10,7 @@ import type { Graphics } from 'pixi.js';
 import type { BoardStore, Op } from '../model/store.ts';
 import type { BoxItem, DashKind, DrawingItem, EndCap, Endpoint, FrameItem, Item, LineItem, Look, PathKind, ShapeKind, Side, Stroke, StyleDef, TextItem } from '../model/types.ts';
 import { lookOf, withoutStyleFields } from '../model/look.ts';
+import { ensureFont } from '../render/fonts.ts';
 import { isLine } from '../model/types.ts';
 import { makeFrame, makeLine, makeShape, makeSticky, makeText, newId, shapeSize, STICKY_SIZE } from '../model/factory.ts';
 import { DEFAULT_STICKY } from '../format/colors.ts';
@@ -1118,9 +1119,16 @@ export class Editor {
    * Поменять оформление выделенного: шрифт, размер, цвета, границу. `undefined` — вернуть «как по умолчанию».
    * Свободный текст после смены шрифта или размера подгоняет рамку под себя.
    */
-  setLook(change: Partial<Look>): void {
+  setLook(change: Partial<Look>, ids: string[] = [...this.selection]): void {
+    // Шрифт ещё не загружен — дождаться (иначе рамка текста посчитается запасным шрифтом).
+    // Объекты фиксируем сейчас: пока шрифт грузится, выделение может смениться.
+    const wait = ensureFont(change.font);
+    if (wait) {
+      void wait.then(() => this.setLook(change, ids));
+      return;
+    }
     this.store.transact('Оформление', () => {
-      for (const id of this.selection) {
+      for (const id of ids) {
         this.store.update(id, (item) => {
           if (isLine(item)) return item;
           const next = { ...item } as unknown as Record<string, unknown>;

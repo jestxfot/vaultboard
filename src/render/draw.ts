@@ -1,12 +1,14 @@
 // Как выглядит каждый вид объекта. Рисует в Pixi Graphics в координатах объекта (0,0 — его левый верхний угол).
 import { CanvasTextMetrics, Graphics, Text, TextStyle, type TextStyleOptions } from 'pixi.js';
 import getStroke from 'perfect-freehand';
-import type { Align, BoxItem, DrawingItem, EndCap, FontKind, LineItem, ShapeKind, Stroke } from '../model/types.ts';
+import type { Align, BoxItem, DrawingItem, EndCap, LineItem, ShapeKind, Stroke } from '../model/types.ts';
 import { decodePoints, type StrokePoint } from '../format/strokes.ts';
 import { DEFAULT_STICKY, hexToNum, isDark, tint } from '../format/colors.ts';
 import { type LineGeom, lineTip, samplePath } from './geometry.ts';
+import { FONT, fontFamily } from './fonts.ts';
 
-export const FONT = '"Segoe UI", "Noto Sans", system-ui, sans-serif';
+export { FONT };
+
 const INK = 0x1f1f1f;
 const BORDER = 0xd4d4d4;
 const LINE = 0x5b5b5b;
@@ -206,12 +208,8 @@ export interface LabelSpec {
   rich: boolean;
 }
 
-export const FONTS: Record<FontKind, string> = {
-  sans: FONT,
-  serif: 'Georgia, "Times New Roman", serif',
-  mono: 'Consolas, "Cascadia Mono", monospace',
-  hand: '"Segoe Print", "Comic Sans MS", cursive',
-};
+/** Семейство шрифта по ключу или имени (оставлено для совместимости: базовые шрифты). */
+export const FONTS = { sans: fontFamily('sans'), serif: fontFamily('serif'), mono: fontFamily('mono'), hand: fontFamily('hand') };
 
 function basename(file: string): string {
   return file.slice(file.lastIndexOf('/') + 1);
@@ -262,7 +260,7 @@ export function labelSpec(item: BoxItem): LabelSpec | null {
   const base = {
     bold: item.bold ?? false,
     italic: item.italic ?? false,
-    fontFamily: FONTS[item.font ?? 'sans'],
+    fontFamily: fontFamily(item.font),
     vcenter: false,
     pad: 14,
     top: 0,
@@ -364,11 +362,11 @@ export function fitFontSize(spec: LabelSpec, w: number, h: number): number {
  * Рамка свободного текста — ровно по тексту. Без `wrap` ширина — по самой длинной строке,
  * с `wrap` — заданная ширина строки, текст переносится.
  */
-export function textBox(text: string, fontSize: number, wrap?: number, font: FontKind = 'sans'): { w: number; h: number } {
+export function textBox(text: string, fontSize: number, wrap?: number, font?: string): { w: number; h: number } {
   const pad = 2;
   const plain = hasMarkup(text) ? stripTags(markdownToTagged(text).text) : text;
   const style = new TextStyle({
-    fontFamily: FONTS[font],
+    fontFamily: fontFamily(font),
     fontSize,
     lineHeight: lineHeightOf(fontSize),
     wordWrap: !!wrap,
