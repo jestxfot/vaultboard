@@ -108,6 +108,9 @@ export const vault = {
     return body as { url: string };
   },
 
+  /** Хранилища Obsidian на этом компьютере; null — Obsidian не установлен. */
+  obsidianVaults: () => request<{ root: string; vaults: string[] | null }>('/api/obsidian-vaults'),
+
   getSettings: () => request<{ proxy?: string }>('/api/settings'),
 
   async putSettings(settings: { proxy?: string }): Promise<void> {

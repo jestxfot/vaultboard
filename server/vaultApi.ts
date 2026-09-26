@@ -33,6 +33,28 @@ const BOARD_FILE = /\.(board|canvas)$/i;
 /** Настройки этого компьютера (не доски): например, прокси для карточек ссылок. */
 const SETTINGS_FILE = path.join(process.env.LOCALAPPDATA ?? os.tmpdir(), 'vaultboard', 'settings.json');
 
+/**
+ * Хранилища, которые знает Obsidian на этом компьютере (его собственный список в obsidian.json).
+ * Ссылка obsidian://open?path=… открывается, только если файл лежит в одном из них.
+ */
+async function obsidianVaults(): Promise<string[] | null> {
+  const home = os.homedir();
+  const candidates = process.platform === 'win32'
+    ? [path.join(process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming'), 'obsidian', 'obsidian.json')]
+    : process.platform === 'darwin'
+      ? [path.join(home, 'Library', 'Application Support', 'obsidian', 'obsidian.json')]
+      : [path.join(home, '.config', 'obsidian', 'obsidian.json'), path.join(home, '.var', 'app', 'md.obsidian.Obsidian', 'config', 'obsidian', 'obsidian.json')];
+  for (const file of candidates) {
+    try {
+      const data = JSON.parse(await fs.readFile(file, 'utf8')) as { vaults?: Record<string, { path?: string }> };
+      return Object.values(data.vaults ?? {}).map((v) => v.path).filter((p): p is string => typeof p === 'string');
+    } catch {
+      // Нет файла — Obsidian тут не установлен или ни разу не запускался.
+    }
+  }
+  return null;
+}
+
 async function readSettings(): Promise<{ proxy?: string }> {
   try {
     return JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')) as { proxy?: string };
@@ -293,6 +315,11 @@ export function vaultApi(root: string): Plugin {
       } catch (err) {
         return sendJson(res, 422, { error: err instanceof Error ? err.message : String(err) });
       }
+    }
+
+    if (req.method === 'GET' && url.pathname === '/obsidian-vaults') {
+      // Читаем каждый раз: хранилище могли только что добавить в Obsidian.
+      return sendJson(res, 200, { root: path.resolve(absRoot), vaults: await obsidianVaults() });
     }
 
     if (url.pathname === '/settings') {

@@ -12,6 +12,7 @@ import { tags } from '@lezer/highlight';
 import type { DocCache, FileIndex } from '../io/files.ts';
 import type { Markdown } from '../format/markdown.ts';
 import { vault } from '../io/vault.ts';
+import { obsidianTarget, type ObsidianTarget } from '../io/obsidian.ts';
 
 export type DocMode = 'read' | 'edit';
 
@@ -159,7 +160,17 @@ export function DocPanel(props: {
     props.onNavigate(a.getAttribute('data-target') ?? '', a.getAttribute('data-path') || null);
   };
 
-  const obsidianUrl = () => `obsidian://open?path=${encodeURIComponent(`${props.root}/${props.path}`.replace(/\//g, '\\'))}`;
+  // Куда откроется заметка в Obsidian — проверяем по его собственному списку хранилищ, а не надеемся.
+  const [target, setTarget] = createSignal<ObsidianTarget | null>(null);
+  createEffect(() => {
+    const p = props.path;
+    setTarget(null);
+    obsidianTarget(p).then((t) => { if (p === props.path) setTarget(t); }, () => undefined);
+  });
+  const okTarget = () => {
+    const t = target();
+    return t?.kind === 'ok' ? t : null;
+  };
 
   return (
     <aside class="doc-panel" classList={{ wide: wide() }} onPointerDown={(e) => e.stopPropagation()}>
@@ -172,7 +183,23 @@ export function DocPanel(props: {
           <button classList={{ active: props.mode === 'read' }} onClick={() => props.onMode('read')}>Чтение</button>
           <button classList={{ active: props.mode === 'edit' }} onClick={() => props.onMode('edit')}>Правка</button>
         </div>
-        <a class="doc-btn" href={obsidianUrl()} title="Открыть эту заметку в Obsidian">Obsidian</a>
+        <Show
+          when={okTarget()}
+          fallback={
+            <Show when={target()}>
+              <span
+                class="doc-btn disabled"
+                title={target()!.kind === 'no-obsidian'
+                  ? 'Obsidian на этом компьютере не найден'
+                  : 'Эта заметка не лежит ни в одном хранилище Obsidian — он её не откроет. Добавь её папку как хранилище в Obsidian.'}
+              >
+                Obsidian
+              </span>
+            </Show>
+          }
+        >
+          {(t) => <a class="doc-btn" href={t().url} title={`Откроется в хранилище Obsidian «${t().vaultName}» (${t().vaultPath})`}>Obsidian</a>}
+        </Show>
         <button class="doc-btn" title={wide() ? 'Обратно в панель' : 'На весь экран'} onClick={() => setWide(!wide())}>{wide() ? '⤡' : '⤢'}</button>
         <button class="doc-btn" title="Закрыть (Esc)" onClick={() => props.onClose()}>×</button>
       </header>
