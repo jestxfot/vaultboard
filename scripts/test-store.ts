@@ -182,5 +182,26 @@ console.log('\nПривязка и стили');
   check(r.color === '#ff0000' && r.bold === true && r.fontSize === 12, 'стиль подставляется снизу, своё поле объекта главнее стиля');
 }
 
+console.log('\nСлои');
+{
+  const st = new BoardStore(emptyBoard());
+  const lg = attachLog(st);
+  st.transact('Слой', () => st.setProp('layers', [{ id: 'photo', name: 'Фото' }]));
+  st.activeLayer = 'photo';
+  st.transact('Фото', () => {
+    st.insert(makeSticky('p1', 0, 0));
+    st.insert({ ...makeSticky('base', 0, 0), layer: '' });
+    st.insert({ ...makeSticky('alien', 0, 0), layer: 'нет-такого' });
+  });
+  check(st.get('p1')?.layer === 'photo', 'новый объект ложится на активный слой');
+  check(st.get('base') !== undefined && !('layer' in st.get('base')!), 'явно основной слой записывается без поля layer');
+  check(st.get('alien')?.layer === 'photo', 'копия со слоем, которого на доске нет, ложится на активный');
+  st.transact('Скрыть', () => st.setProp('layers', [{ id: 'photo', name: 'Фото', hidden: true }]));
+  st.undo();
+  check(!st.doc.layers?.[0].hidden, 'скрытие слоя отменяется как любая правка');
+  const back = rebuildHistory(st.doc.items, parseLog(lg.map((l) => JSON.stringify(l)).join('\n')), st.rev);
+  check(!!back && back.undo.length === 2 && back.redo.length === 1, 'правки слоёв восстанавливаются из журнала на диске');
+}
+
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');
 process.exit(failed ? 1 : 0);

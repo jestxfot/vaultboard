@@ -8,7 +8,8 @@
 // Горячие клавиши работают по физическим клавишам (e.code), поэтому одинаково в русской и английской раскладке.
 import type { Graphics } from 'pixi.js';
 import type { BoardStore, Op } from '../model/store.ts';
-import type { BoxItem, DashKind, DrawingItem, EndCap, Endpoint, FrameItem, Item, LineItem, Look, PathKind, ShapeKind, Side, Stroke, StyleDef, TextItem } from '../model/types.ts';
+import { BASE_LAYER, BASE_NAME, layerOf, layersOf } from '../model/layers.ts';
+import type { BoxItem, DashKind, DrawingItem, EndCap, Endpoint, FrameItem, Item, LayerDef, LineItem, Look, PathKind, ShapeKind, Side, Stroke, StyleDef, TextItem } from '../model/types.ts';
 import { lookOf, withoutStyleFields } from '../model/look.ts';
 import { ensureFont } from '../render/fonts.ts';
 import { isLine } from '../model/types.ts';
@@ -21,6 +22,7 @@ import { drawStroke, textBox } from '../render/draw.ts';
 import { decodePoints, encodePoints, shiftPoints, type StrokePoint } from '../format/strokes.ts';
 import { recognize } from './recognize.ts';
 import { embedUrl } from '../format/embed.ts';
+import { LINK_COVER, LINK_W } from '../render/BoardView.ts';
 import { type Guide, snapRect, type XEdge, type YEdge } from './snap.ts';
 import { distToLine, distToSegment, geomPoints, inRect, rectContains, rectFromPoints, rectsIntersect, round2, unionRect } from './hit.ts';
 import { type CloseReason, type EditField, TextEditor } from './TextEditor.ts';
@@ -171,6 +173,8 @@ export class Editor {
   onQuickOpen: (() => void) | null = null;
   /** Запустить видео прямо на доске, поверх карточки ссылки. */
   onPlayEmbed: ((id: string) => void) | null = null;
+  /** Открыть или закрыть панель слоёв (Shift+L). */
+  onLayers: (() => void) | null = null;
   /** Вставили адрес страницы — приложение разворачивает его в карточку и зовёт applyUnfurl. */
   onUnfurl: ((id: string, url: string) => void) | null = null;
   /** Щелчок правой кнопкой: меню по объекту (target) или по доске (target = null). */
@@ -246,6 +250,7 @@ export class Editor {
   storeChanged(ops: Op[]): void {
     for (const op of ops) {
       if (op.t === 'delete' && !this.store.has(op.item.id)) this.selection.delete(op.item.id);
+      if (op.t === 'prop' && op.key === 'layers') this.layersChanged();
       if (op.t === 'replace' && op.after.id === this.text.activeId && !isLine(op.after)) this.text.update(this.view.look(op.after));
     }
     if (this.hover && !this.store.has(this.hover)) this.hover = null;
@@ -577,14 +582,18 @@ export class Editor {
           this.onContextMenu?.({ clientX: g.clientX, clientY: g.clientY, at: w, target: hit });
         }
         break;
-      case 'press':
+      case 'press': {
         if (g.toggleOff) {
           this.selection.delete(g.id);
           this.changed();
         } else if (!p.shift && this.selection.size > 1) {
           this.select([g.id]);
         }
+        // Щелчок по видео запускает его прямо на доске; перетаскивание по-прежнему двигает карточку.
+        const item = this.store.get(g.id);
+        if (!g.toggleOff && !p.shift && item?.kind === 'link' && embedUrl(item.url)) this.onPlayEmbed?.(g.id);
         break;
+      }
       case 'move':
       case 'resize':
       case 'endpoint':
@@ -654,7 +663,8 @@ export class Editor {
 
   /** Объект, к которому можно прицепить линию (не линия и не рамка — рамку тоже можно, но только за край). */
   private hitBox(w: Point, exclude?: string): string | null {
-    const candidates = this.view.search({ x: w.x, y: w.y, w: 0, h: 0 });
+    // Линию можно прицепить и к объекту закреплённого слоя (например, стрелку к фото-подложке).
+    const candidates = this.view.search({ x: w.x, y: w.y, w: 0, h: 0 }, true);
     candidates.sort((a, b) => this.store.indexOf(b.id) - this.store.indexOf(a.id));
     for (const item of candidates) {
       if (item.id === exclude || isLine(item) || item.kind === 'frame') continue;
@@ -859,7 +869,7 @@ export class Editor {
     const start = unionRect([...boxes.values()]);
     if (!start) return;
     // Фото и текст за угол меняются пропорционально: текст при этом увеличивается целиком, вместе со шрифтом.
-    const aspect = shift || [...boxes.values()].every((b) => b.kind === 'image' || b.kind === 'text');
+    const aspect = shift || [...boxes.values()].every((b) => b.kind === 'image' || b.kind === 'text' || b.kind === 'link');
     this.store.beginGesture('Размер');
     this.gesture = { kind: 'resize', handle, start, boxes, aspect };
   }
@@ -1608,7 +1618,7 @@ export class Editor {
   replaceWithDoc(id: string, path: string): void {
     const item = this.store.get(id);
     if (!isBox(item)) return;
-    const next: BoxItem = { id: this.id(), kind: 'doc', file: this.view.paths.toStored(path), x: item.x, y: item.y, w: Math.max(item.w, 240), h: Math.max(item.h, 200) };
+    const next: BoxItem = { id: this.id(), kind: 'doc', file: this.view.paths.toStored(path), x: item.x, y: item.y, w: Math.max(item.w, 240), h: Math.max(item.h, 200), layer: layerOf(item) };
     const index = this.store.indexOf(id);
     this.store.transact('В документ', () => {
       // Прицепленные линии переносим на новую карточку, а не теряем.
@@ -1670,8 +1680,146 @@ export class Editor {
     this.select(ids);
   }
 
+  /** Всё, что сейчас можно выделить: без скрытых и закреплённых слоёв. */
   selectAll(): void {
-    this.select(this.store.items.map((i) => i.id));
+    this.select(this.store.items.filter((i) => this.pickable(i)).map((i) => i.id));
+  }
+
+  private pickable(item: Item): boolean {
+    return !this.view.isHidden(item) && !this.view.isLayerLocked(item);
+  }
+
+  // ---------- слои ----------
+
+  layers(): LayerDef[] {
+    return layersOf(this.store.doc);
+  }
+
+  get activeLayer(): string {
+    return this.store.activeLayer;
+  }
+
+  /** Сделать слой активным: новые объекты, фото и вставки ложатся на него. */
+  setActiveLayer(id: string): void {
+    this.store.activeLayer = id;
+    this.changed();
+  }
+
+  layerUsage(): Map<string, number> {
+    const count = new Map<string, number>();
+    for (const item of this.store.items) count.set(layerOf(item), (count.get(layerOf(item)) ?? 0) + 1);
+    return count;
+  }
+
+  private setLayers(label: string, list: LayerDef[], extra?: () => void): void {
+    this.store.transact(label, () => {
+      extra?.();
+      // Основной слой без настроек в файл не пишем — доска без слоёв остаётся такой же, как была.
+      const clean = list.filter((l) => l.id !== BASE_LAYER || l.hidden || l.locked || l.name !== BASE_NAME);
+      this.store.setProp('layers', clean.length ? clean : undefined);
+    });
+  }
+
+  private patchLayer(id: string, change: Partial<LayerDef>, label: string): void {
+    this.setLayers(label, this.layers().map((l) => {
+      if (l.id !== id) return l;
+      const next = { ...l, ...change };
+      if (!next.hidden) delete next.hidden;
+      if (!next.locked) delete next.locked;
+      return next;
+    }));
+  }
+
+  /** Новый слой; с `fromSelection` на него сразу переезжает выделенное. Слой становится активным. */
+  addLayer(name: string, fromSelection = false): string {
+    const id = this.id();
+    const move = fromSelection ? [...this.selection] : [];
+    this.setLayers('Новый слой', [...this.layers(), { id, name }], () => {
+      for (const itemId of move) this.store.update(itemId, (item) => ({ ...item, layer: id }));
+    });
+    this.setActiveLayer(id);
+    return id;
+  }
+
+  renameLayer(id: string, name: string): void {
+    if (name.trim()) this.patchLayer(id, { name: name.trim() }, 'Переименовать слой');
+  }
+
+  toggleLayerHidden(id: string): void {
+    const l = this.layers().find((x) => x.id === id);
+    if (l) this.patchLayer(id, { hidden: !l.hidden }, l.hidden ? 'Показать слой' : 'Скрыть слой');
+  }
+
+  toggleLayerLocked(id: string): void {
+    const l = this.layers().find((x) => x.id === id);
+    if (l) this.patchLayer(id, { locked: !l.locked }, l.locked ? 'Открепить слой' : 'Закрепить слой');
+  }
+
+  /** Показать только этот слой; если он уже единственный видимый — показать все. */
+  soloLayer(id: string): void {
+    const list = this.layers();
+    const alone = list.every((l) => (l.id === id) !== !!l.hidden);
+    this.setLayers(alone ? 'Показать все слои' : 'Только этот слой', list.map((l) => {
+      const next = { ...l };
+      if (!alone && l.id !== id) next.hidden = true;
+      else delete next.hidden;
+      return next;
+    }));
+  }
+
+  /** Удалить слой; его объекты переходят на основной слой. */
+  deleteLayer(id: string): void {
+    if (id === BASE_LAYER) return;
+    const items = this.store.items.filter((i) => i.layer === id).map((i) => i.id);
+    this.setLayers('Удалить слой', this.layers().filter((l) => l.id !== id), () => {
+      for (const itemId of items) {
+        this.store.update(itemId, (item) => {
+          const next = { ...item };
+          delete next.layer;
+          return next;
+        });
+      }
+    });
+  }
+
+  /** Перенести выделенное на слой. */
+  moveSelectionToLayer(id: string): void {
+    const ids = [...this.selection];
+    this.store.transact('На слой', () => {
+      for (const itemId of ids) {
+        this.store.update(itemId, (item) => {
+          if (layerOf(item) === id) return item;
+          const next = { ...item };
+          if (id) next.layer = id;
+          else delete next.layer;
+          return next;
+        });
+      }
+    });
+    this.changed();
+  }
+
+  /** Выделить все объекты слоя (скрытый слой сначала показывается). */
+  selectLayer(id: string): void {
+    const l = this.layers().find((x) => x.id === id);
+    if (l?.hidden) this.toggleLayerHidden(id);
+    this.select(this.store.items.filter((i) => layerOf(i) === id).map((i) => i.id));
+  }
+
+  /**
+   * Слои поменялись: из выделения уходит всё, что стало невидимым или закреплённым;
+   * если активный слой скрыт или закреплён, активным становится первый доступный — иначе новые объекты исчезали бы сразу.
+   */
+  private layersChanged(): void {
+    for (const id of [...this.selection]) {
+      const item = this.store.get(id);
+      if (item && !this.pickable(item)) this.selection.delete(id);
+    }
+    const list = this.layers();
+    const active = list.find((l) => l.id === this.store.activeLayer);
+    if (!active || active.hidden || active.locked) {
+      this.store.activeLayer = list.find((l) => !l.hidden && !l.locked)?.id ?? BASE_LAYER;
+    }
   }
 
   /** Замок: закреплённый объект не двигается и не меняет размер, пока его не открепят. */
@@ -1764,7 +1912,9 @@ export class Editor {
 
   /** Карточка ссылки у точки: сразу с адресом, через мгновение — с заголовком и обложкой. */
   createLinkAt(url: string, at: Point): void {
-    const w = 320, h = 110;
+    // Видео сразу в пропорциях кадра 16:9; обычная ссылка — узкая карточка, дорастёт, когда придёт обложка.
+    const video = !!embedUrl(url);
+    const w = video ? 480 : LINK_W, h = video ? 270 : 110;
     const item: BoxItem = { id: this.id(), kind: 'link', url, x: round2(at.x - w / 2), y: round2(at.y - h / 2), w, h };
     this.store.transact('Ссылка', () => this.store.insert(item));
     this.select([item.id]);
@@ -1776,7 +1926,9 @@ export class Editor {
     const item = this.store.get(id);
     if (!item || item.kind !== 'link') return;
     const w = item.w;
-    const h = data.image ? Math.round(w * 0.52) + 122 : 124;
+    // Высота в масштабе карточки: уменьшенная карточка остаётся уменьшенной и после обновления.
+    const k = w / LINK_W;
+    const h = embedUrl(data.url) ? Math.round((w * 9) / 16) : Math.round(((data.image ? Math.round(LINK_W * LINK_COVER) + 122 : 124) * k));
     this.store.transact('Карточка ссылки', () =>
       this.store.update(id, (it) => {
         const next = { ...it, url: data.url, w, h } as Record<string, unknown>;
@@ -1854,7 +2006,7 @@ export class Editor {
     if (ctrl) {
       if (code === 'KeyZ') { handled(); if (e.shiftKey) this.redo(); else this.undo(); }
       else if (code === 'KeyY') { handled(); this.redo(); }
-      else if (code === 'KeyA') { handled(); this.select(this.store.items.map((i) => i.id)); }
+      else if (code === 'KeyA') { handled(); this.selectAll(); }
       else if (code === 'KeyD') { handled(); this.duplicate(); }
       else if (code === 'KeyK') { handled(); this.onQuickOpen?.(); }
       else if (code === 'KeyB' && this.selection.size) { handled(); this.toggleFormat('bold'); }
@@ -1922,7 +2074,11 @@ export class Editor {
       case 'KeyT': handled(); this.createTextAt(this.cursorPoint()); break;
       case 'KeyR': handled(); this.createShapeAt(this.cursorPoint(), 'rect'); break;
       case 'KeyO': handled(); this.createShapeAt(this.cursorPoint(), 'ellipse'); break;
-      case 'KeyL': handled(); this.setTool('line', { path: 'straight', end: 'arrow' }); break;
+      case 'KeyL':
+        handled();
+        if (e.shiftKey) this.onLayers?.();
+        else this.setTool('line', { path: 'straight', end: 'arrow' });
+        break;
       case 'KeyF': handled(); this.setTool('frame'); break;
       case 'KeyP': handled(); this.setTool('pen'); break;
       case 'KeyM': handled(); this.setTool('marker'); break;

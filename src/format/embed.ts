@@ -1,7 +1,12 @@
 // Видео, которое можно смотреть прямо на доске: YouTube (в режиме без рекламных cookie) и Vimeo.
 
-/** Адрес плеера для ссылки на видео или null, если это не видео. */
-export function embedUrl(raw: string): string | null {
+interface Video {
+  host: 'youtube' | 'vimeo';
+  id: string;
+  start: number;
+}
+
+function parse(raw: string): Video | null {
   let u: URL;
   try {
     u = new URL(raw);
@@ -22,11 +27,35 @@ export function embedUrl(raw: string): string | null {
       const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/.exec(t);
       if (m) start = Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0);
     }
-    return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0${start ? `&start=${start}` : ''}`;
+    return { host: 'youtube', id, start };
   }
   if (host === 'vimeo.com') {
     const vid = /^\/(\d+)/.exec(u.pathname)?.[1];
-    if (vid) return `https://player.vimeo.com/video/${vid}?autoplay=1`;
+    if (vid) return { host: 'vimeo', id: vid, start: 0 };
   }
   return null;
+}
+
+/**
+ * Адрес плеера для ссылки на видео или null, если это не видео.
+ * Плеер слушает команды от доски (enablejsapi): щелчок по карточке запускает видео без перезагрузки плеера.
+ */
+export function embedUrl(raw: string, autoplay = false): string | null {
+  const v = parse(raw);
+  if (!v) return null;
+  if (v.host === 'youtube') {
+    const q = new URLSearchParams({ rel: '0', enablejsapi: '1', playsinline: '1', origin: location.origin });
+    if (autoplay) q.set('autoplay', '1');
+    if (v.start) q.set('start', String(v.start));
+    return `https://www.youtube-nocookie.com/embed/${v.id}?${q}`;
+  }
+  return `https://player.vimeo.com/video/${v.id}${autoplay ? '?autoplay=1' : ''}`;
+}
+
+/** Сказать плееру «играй» или «пауза» — через postMessage, как это делают официальные API YouTube и Vimeo. */
+export function playerCommand(frame: HTMLIFrameElement, play: boolean): void {
+  const target = frame.contentWindow;
+  if (!target) return;
+  if (frame.src.includes('vimeo.com')) target.postMessage(JSON.stringify({ method: play ? 'play' : 'pause' }), '*');
+  else target.postMessage(JSON.stringify({ event: 'command', func: play ? 'playVideo' : 'pauseVideo', args: [] }), '*');
 }

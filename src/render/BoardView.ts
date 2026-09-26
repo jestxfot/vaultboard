@@ -12,6 +12,7 @@
 import { Application, CanvasTextMetrics, Container, Graphics, HTMLText, Rectangle, RenderTexture, Sprite, Text, Texture, TilingSprite } from 'pixi.js';
 import RBush from 'rbush';
 import type { Background, BoardDoc, BoxItem, DocItem, ImageItem, Item, LineItem, LinkItem } from '../model/types.ts';
+import { layerFlags, layerOf } from '../model/layers.ts';
 import { resolveLook } from '../model/look.ts';
 import { hexToNum, isDark } from '../format/colors.ts';
 import type { DocCache } from '../io/files.ts';
@@ -34,6 +35,11 @@ export interface Camera {
 }
 
 export const MIN_ZOOM = 0.02;
+
+/** Эталонная ширина карточки ссылки: в ней свёрстана карточка, настоящая — её копия в масштабе. */
+export const LINK_W = 320;
+/** Высота обложки карточки ссылки — доля ширины. */
+export const LINK_COVER = 0.52;
 export const MAX_ZOOM = 8;
 
 /** Оформление markdown на карточке документа. Классы с префиксом, чтобы не задеть страницу. */
@@ -116,6 +122,11 @@ class ItemView {
   lineStep = 0;
   /** Развёрнутая карточка ссылки: обложка, значок, сайт, заголовок, описание. */
   linkUi: Container | null = null;
+  /** Чёткость, с которой построен текст карточки ссылки. */
+  linkRes = 0;
+  /** Обрезанный под карточку кадр видео и текстура, из которой он вырезан. */
+  coverTex: Texture | null = null;
+  coverFor: Texture | null = null;
   /** Маленький снимок объекта с текстом — показывается издалека вместо серого прямоугольника. */
   snapshot: Texture | null = null;
   /** Текст документа на карточке (отформатированный markdown). */
@@ -178,6 +189,9 @@ export class BoardView {
   /** Открытая доска — отсюда берутся её стили и фон (хранилище меняет их на месте). */
   private doc: BoardDoc | null = null;
   private gridKind = '';
+  /** Скрытые и закреплённые слои. Объекты скрытых не попадают в индекс — не рисуются и не ловятся мышью. */
+  private hiddenLayers = new Set<string>();
+  private lockedLayers = new Set<string>();
   private darkBackground = false;
   /** Файл (фото или заметка) → объекты доски, которые его показывают. */
   private readonly fileViews = new Map<string, Set<ItemView>>();
@@ -287,6 +301,7 @@ export class BoardView {
 
   load(doc: BoardDoc, fit = true): void {
     this.doc = doc;
+    this.syncLayers();
     this.farLines = null;
     this.applyBackground(doc.background);
     for (const child of this.world.removeChildren()) child.destroy({ children: true });
@@ -326,8 +341,10 @@ export class BoardView {
     const touched = new Set<string>();
     let stylesChanged = false;
     let darkChanged = false;
+    let layersChanged = false;
     for (const op of ops) {
       if (op.t === 'prop') {
+        if (op.key === 'layers') layersChanged = this.syncLayers();
         if (op.key === 'styles') stylesChanged = true;
         if (op.key === 'background') {
           const wasDark = this.darkBackground;
@@ -405,7 +422,8 @@ export class BoardView {
     if (lines.size) this.farLinesDirty = true;
     // Немного правок — переставляем объекты в индексе по одному. Много (выделили всё и тащат) —
     // быстрее пересобрать индекс целиком одной пачкой.
-    if (touched.size + lines.size > 300) {
+    if (layersChanged) this.farLinesDirty = true;
+    if (layersChanged || touched.size + lines.size > 300) {
       this.index.clear();
       const entries: Entry[] = [];
       for (const v of this.views.values()) {
@@ -464,61 +482,84 @@ export class BoardView {
 
   /**
    * Карточка ссылки как в Miro: обложка сверху, ниже значок и название сайта, заголовок и описание.
+   * Вся карточка рисуется в одном масштабе от ширины: уменьшил карточку — уменьшился и текст.
+   * Видео — просто кадр во всю карточку с кнопкой ▶, без подписи: сам плеер ставит поверх слой видео.
    * Картинки берутся из кэша фото (они лежат в папке доски) и подставляются, когда загрузятся.
    */
   private buildLinkCard(v: ItemView, item: LinkItem): void {
     const ui = new Container();
+    v.linkUi = ui;
+    v.container.addChild(ui);
+    if (embedUrl(item.url)) {
+      const bg = new Graphics().roundRect(0, 0, item.w, item.h, 6).fill(0x0f0f0f);
+      ui.addChild(bg);
+      if (item.image) {
+        const cover = new Sprite(Texture.EMPTY);
+        cover.label = 'cover';
+        ui.addChild(cover);
+      }
+      const play = new Graphics();
+      const cx = item.w / 2, cy = item.h / 2, r = Math.min(item.w, item.h) * 0.11;
+      play.roundRect(cx - r * 1.4, cy - r, r * 2.8, r * 2, r * 0.6).fill({ color: 0xff0033, alpha: 0.92 });
+      play.poly([cx - r * 0.35, cy - r * 0.5, cx - r * 0.35, cy + r * 0.5, cx + r * 0.55, cy]).fill(0xffffff);
+      ui.addChild(play);
+      this.updateLinkImages(v);
+      return;
+    }
+
+    // Карточка рисуется в «эталонной» ширине и целиком масштабируется под настоящую.
+    const k = item.w / LINK_W;
+    const W = LINK_W, H = item.h / k;
+    const inner = new Container();
+    inner.scale.set(k);
+    ui.addChild(inner);
     const pad = 14;
-    const coverH = item.image ? Math.round(item.w * 0.52) : 0;
+    const coverH = item.image ? Math.round(W * LINK_COVER) : 0;
     let y = coverH + 12;
-    const res = this.labelResolution();
+    const res = this.linkResolution(item);
+    v.linkRes = this.labelResolution();
     if (item.image) {
       const cover = new Sprite(Texture.WHITE);
       cover.tint = 0xe9e9e6;
       cover.label = 'cover';
-      cover.setSize(item.w, coverH);
-      ui.addChild(cover);
-      // Видео — кнопка ▶ посередине обложки: двойной щелчок запускает его прямо на доске.
-      if (embedUrl(item.url)) {
-        const play = new Graphics();
-        const cx = item.w / 2, cy = coverH / 2, r = Math.min(34, coverH / 5);
-        play.roundRect(cx - r * 1.4, cy - r, r * 2.8, r * 2, r * 0.6).fill({ color: 0xff0033, alpha: 0.92 });
-        play.poly([cx - r * 0.35, cy - r * 0.5, cx - r * 0.35, cy + r * 0.5, cx + r * 0.55, cy]).fill(0xffffff);
-        ui.addChild(play);
-      }
+      cover.setSize(W, coverH);
+      inner.addChild(cover);
     }
     const favicon = new Sprite(Texture.WHITE);
     favicon.label = 'favicon';
     favicon.tint = 0xdedede;
     favicon.position.set(pad, y);
     favicon.setSize(16, 16);
-    ui.addChild(favicon);
+    inner.addChild(favicon);
     const site = new Text({ text: item.site ?? '', style: { fontFamily: FONT, fontSize: 12, fill: 0x6b6b6b }, resolution: res });
     site.position.set(pad + 22, y);
-    ui.addChild(site);
+    inner.addChild(site);
     y += 24;
     const title = new Text({
       text: item.title ?? item.url,
-      style: { fontFamily: FONT, fontSize: 15, fontWeight: '700', fill: 0x1f1f1f, wordWrap: true, breakWords: true, wordWrapWidth: item.w - pad * 2, lineHeight: 20 },
+      style: { fontFamily: FONT, fontSize: 15, fontWeight: '700', fill: 0x1f1f1f, wordWrap: true, breakWords: true, wordWrapWidth: W - pad * 2, lineHeight: 20 },
       resolution: res,
     });
     this.clampLines(title, 2);
     title.position.set(pad, y);
-    ui.addChild(title);
+    inner.addChild(title);
     y += title.height + 6;
-    if (item.description && y < item.h - 20) {
+    if (item.description && y < H - 20) {
       const desc = new Text({
         text: item.description,
-        style: { fontFamily: FONT, fontSize: 13, fill: 0x6b6b6b, wordWrap: true, breakWords: true, wordWrapWidth: item.w - pad * 2, lineHeight: 18 },
+        style: { fontFamily: FONT, fontSize: 13, fill: 0x6b6b6b, wordWrap: true, breakWords: true, wordWrapWidth: W - pad * 2, lineHeight: 18 },
         resolution: res,
       });
-      this.clampLines(desc, Math.max(1, Math.floor((item.h - y - 10) / 18)));
+      this.clampLines(desc, Math.max(1, Math.floor((H - y - 10) / 18)));
       desc.position.set(pad, y);
-      ui.addChild(desc);
+      inner.addChild(desc);
     }
-    v.linkUi = ui;
-    v.container.addChild(ui);
     this.updateLinkImages(v);
+  }
+
+  /** Чёткость текста карточки: как у обычных надписей, но с поправкой на её масштаб. */
+  private linkResolution(item: LinkItem): number {
+    return Math.min(8, Math.max(0.5, this.labelResolution() * (item.w / LINK_W)));
   }
 
   /** Обрезать текст до числа строк с «…». */
@@ -535,20 +576,45 @@ export class BoardView {
     const item = v.item as LinkItem;
     const ui = v.linkUi;
     if (!ui) return;
-    const set = (name: string, file: string | undefined, level: Level, w: number, h: number) => {
-      const sprite = ui.getChildByLabel(name) as Sprite | null;
-      if (!sprite || !file) return;
+    const video = !!embedUrl(item.url);
+    const find = (name: string): Sprite | null => (ui.getChildByLabel(name, true) as Sprite | null);
+    const load = (file: string | undefined, level: Level) => {
+      if (!file) return null;
       const path = this.paths.toVault(file);
       this.images.request(path, level);
-      const best = this.images.best(path, level);
-      if (best && sprite.texture !== best.tex) {
-        sprite.texture = best.tex;
-        sprite.tint = 0xffffff;
-        sprite.setSize(w, h);
-      }
+      return this.images.best(path, level);
     };
-    set('cover', item.image, 1, item.w, Math.round(item.w * 0.52));
-    set('favicon', item.favicon, 0, 16, 16);
+    const cover = find('cover');
+    const best = load(item.image, 1);
+    if (cover && best) {
+      if (video) {
+        // Кадр видео заполняет карточку целиком: лишнее по краям обрезаем (у YouTube там чёрные полосы 4:3).
+        const src = best.tex;
+        if (cover.texture.source !== src.source || v.coverFor !== src) {
+          const aspect = item.w / item.h;
+          let fw = src.width, fh = src.width / aspect;
+          if (fh > src.height) { fh = src.height; fw = fh * aspect; }
+          // Полосы сверху и снизу у превью YouTube — примерно по 1/8 высоты: берём середину кадра.
+          const frame = new Rectangle(src.frame.x + (src.width - fw) / 2, src.frame.y + (src.height - fh) / 2, fw, fh);
+          if (v.coverTex) v.coverTex.destroy(false);
+          v.coverTex = new Texture({ source: src.source, frame });
+          v.coverFor = src;
+          cover.texture = v.coverTex;
+          cover.setSize(item.w, item.h);
+        }
+      } else if (cover.texture !== best.tex) {
+        cover.texture = best.tex;
+        cover.tint = 0xffffff;
+        cover.setSize(LINK_W, Math.round(LINK_W * LINK_COVER));
+      }
+    }
+    const favicon = find('favicon');
+    const icon = load(item.favicon, 0);
+    if (favicon && icon && favicon.texture !== icon.tex) {
+      favicon.texture = icon.tex;
+      favicon.tint = 0xffffff;
+      favicon.setSize(16, 16);
+    }
   }
 
   /** Шрифт загрузился — перерисовать все надписи им. */
@@ -621,7 +687,38 @@ export class BoardView {
     return v;
   }
 
+  /** Перечитать слои доски. Возвращает true, если поменялось, какие слои скрыты. */
+  private syncLayers(): boolean {
+    const { hidden, locked } = layerFlags(this.doc!);
+    const changed = hidden.size !== this.hiddenLayers.size || [...hidden].some((id) => !this.hiddenLayers.has(id));
+    this.hiddenLayers = hidden;
+    this.lockedLayers = locked;
+    return changed;
+  }
+
+  /** Объект на скрытом слое. Линия прячется и тогда, когда скрыт объект на любом её конце. */
+  isHidden(item: Item): boolean {
+    if (!this.hiddenLayers.size) return false;
+    if (this.hiddenLayers.has(layerOf(item))) return true;
+    if (!isLine(item)) return false;
+    for (const ep of [item.from, item.to]) {
+      if (!('item' in ep)) continue;
+      const other = this.views.get(ep.item)?.item;
+      if (other && this.hiddenLayers.has(layerOf(other))) return true;
+    }
+    return false;
+  }
+
+  /** Объект на закреплённом слое: виден, но мышью не выделяется. */
+  isLayerLocked(item: Item): boolean {
+    return this.lockedLayers.size > 0 && this.lockedLayers.has(layerOf(item));
+  }
+
   private makeEntry(v: ItemView): Entry | null {
+    if (this.isHidden(v.item)) {
+      v.entry = null;
+      return null;
+    }
     const r = isLine(v.item) ? this.lineBounds(v.item) : this.rects.get(v.item.id);
     if (!r) return null;
     v.entry = { minX: r.x, minY: r.y, maxX: r.x + r.w, maxY: r.y + r.h, view: v };
@@ -647,6 +744,7 @@ export class BoardView {
       this.snapshotCount--;
     }
     for (const file of this.filesOf(v.item)) this.fileViews.get(file)?.delete(v);
+    if (v.coverTex) v.coverTex.destroy(false);
     // Текстуры фото общие и живут в кэше — спрайт уничтожается без них.
     v.container.destroy({ children: true });
   }
@@ -664,9 +762,15 @@ export class BoardView {
 
   // ---------- запросы для редактора ----------
 
-  /** Объекты, чьи границы пересекают прямоугольник доски. */
-  search(r: Rect): Item[] {
-    return this.index.search({ minX: r.x, minY: r.y, maxX: r.x + r.w, maxY: r.y + r.h }).map((e) => e.view.item);
+  /**
+   * Объекты, чьи границы пересекают прямоугольник доски. Скрытых слоёв тут нет никогда,
+   * закреплённых — только с `withLocked` (к ним можно прицепить линию и прилипнуть при перетаскивании).
+   */
+  search(r: Rect, withLocked = false): Item[] {
+    const hits = this.index.search({ minX: r.x, minY: r.y, maxX: r.x + r.w, maxY: r.y + r.h });
+    const out: Item[] = [];
+    for (const e of hits) if (withLocked || !this.isLayerLocked(e.view.item)) out.push(e.view.item);
+    return out;
   }
 
   rectOf(id: string): Rect | undefined {
@@ -1025,7 +1129,7 @@ export class BoardView {
       }
     } else {
       drawBox(g, this.look(item));
-      if (item.kind === 'link' && item.title) {
+      if (item.kind === 'link' && (item.title || embedUrl(item.url))) {
         v.gfx = g;
         v.container.addChildAt(g, v.far ? 1 : 0);
         this.nearCount++;
@@ -1064,7 +1168,7 @@ export class BoardView {
     g.clear();
     const minWidth = LINE_MIN_PX / step;
     for (const v of this.views.values()) {
-      if (!isLine(v.item)) continue;
+      if (!isLine(v.item) || this.isHidden(v.item)) continue;
       const geom = this.lineGeom(v.item);
       if (!geom) continue;
       const look = this.look(v.item);
@@ -1217,6 +1321,15 @@ export class BoardView {
             v.body.resolution = res;
             v.bodyRes = res;
           }
+        });
+      }
+      if (v.linkUi?.visible && v.linkRes && v.linkRes !== res) {
+        // Карточка ссылки: пересчитать чёткость её надписей под новый масштаб.
+        this.miscQueue.set(`link:${v.item.id}`, () => {
+          if (!v.linkUi || !this.visible.has(v)) return;
+          const r = this.linkResolution(v.item as LinkItem);
+          for (const child of v.linkUi.children[0]?.children ?? []) if (child instanceof Text) child.resolution = r;
+          v.linkRes = res;
         });
       }
       if (v.label?.visible && v.labelRes !== res) {

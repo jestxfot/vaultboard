@@ -10,7 +10,7 @@ import type { BoardDoc, Item } from './types.ts';
 import { isLine } from './types.ts';
 
 /** Свойства всей доски, которые меняются через историю (их правки отменяются как всё остальное). */
-export type DocProp = 'styles' | 'background';
+export type DocProp = 'styles' | 'background' | 'layers';
 
 export type Op =
   | { t: 'insert'; index: number; item: Item }
@@ -115,6 +115,8 @@ export class BoardStore {
   /** Куда сейчас записываются операции: транзакция или порция жеста. */
   private sink: Op[] | null = null;
   private gesture: Tx | null = null;
+  /** Слой, на который ложатся новые объекты. Пустая строка — основной слой. */
+  activeLayer = '';
 
   constructor(doc: BoardDoc) {
     this.doc = doc;
@@ -189,7 +191,7 @@ export class BoardStore {
 
   insert(item: Item, index = this.doc.items.length): void {
     if (this.byId.has(item.id)) throw new Error(`Объект ${item.id} уже есть на доске`);
-    this.run({ t: 'insert', index, item });
+    this.run({ t: 'insert', index, item: this.onLayer(item) });
   }
 
   /** Удаляет объект вместе с прицепленными к нему линиями. */
@@ -310,6 +312,20 @@ export class BoardStore {
   }
 
   // ---------- внутреннее ----------
+
+  /**
+   * Новый объект ложится на активный слой. Если у него уже есть слой этой доски (копия, дубликат) —
+   * остаётся на нём; пустая строка — явно основной слой.
+   */
+  private onLayer(item: Item): Item {
+    const known = item.layer !== undefined && (item.layer === '' || !!this.doc.layers?.some((l) => l.id === item.layer));
+    const layer = known ? item.layer! : this.activeLayer;
+    if (layer === (item.layer ?? '') && item.layer !== '') return item;
+    const next = { ...item };
+    if (layer) next.layer = layer;
+    else delete next.layer;
+    return next;
+  }
 
   private write(fn: () => void): void {
     if (this.sink) fn();

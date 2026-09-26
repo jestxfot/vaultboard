@@ -13,6 +13,8 @@ interface Common {
   /** Имя стиля из библиотеки стилей. */
   style?: string;
   locked?: boolean;
+  /** Слой, на котором лежит объект. Нет поля — основной слой. */
+  layer?: string;
 }
 
 export type FontKind = 'sans' | 'serif' | 'mono' | 'hand';
@@ -118,6 +120,19 @@ export interface Background {
   grid: GridKind;
 }
 
+/**
+ * Слой доски: набор объектов, который можно разом скрыть или закрепить (например, все фото).
+ * Слои не меняют порядок наложения — кто выше, решает сам объект, как и раньше.
+ * Основной слой — это объекты без поля `layer`; в списке он записан с пустым id.
+ */
+export interface LayerDef {
+  id: string;
+  name: string;
+  hidden?: boolean;
+  /** Закреплённый слой виден, но его объекты нельзя выделить — доска под ними двигается, как пустая. */
+  locked?: boolean;
+}
+
 export interface CommentMessage {
   author: string;
   time: string;
@@ -141,6 +156,7 @@ export interface BoardDoc {
   /** Стили этой доски — лежат в самой доске и переезжают вместе с её папкой. */
   styles?: Record<string, StyleDef>;
   background?: Background;
+  layers?: LayerDef[];
   /** Неизвестные поля верхнего уровня сохраняются как есть. */
   [extra: string]: unknown;
 }

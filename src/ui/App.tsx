@@ -19,9 +19,10 @@ import { QuickOpen } from './QuickOpen.tsx';
 import { ContextMenu, type MenuEntry } from './ContextMenu.tsx';
 import { ExportDialog } from './ExportDialog.tsx';
 import { StylesPanel } from './StylesPanel.tsx';
+import { LayersPanel } from './LayersPanel.tsx';
 import { HelpDialog } from './HelpDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
-import { EmbedPlayer } from './EmbedPlayer.tsx';
+import { EmbedLayer } from './EmbedLayer.ts';
 import { embedUrl } from '../format/embed.ts';
 import { exportBoard, type ExportFormat, saveBlob } from '../render/export.ts';
 import type { Background, GridKind, StyleDef } from '../model/types.ts';
@@ -48,6 +49,8 @@ import { BOARD_FILE, boardFolderOf, BoardPaths, boardTitleOf } from '../model/pa
 interface Opened {
   store: BoardStore;
   editor: Editor;
+  /** Живые плееры видео поверх карточек. */
+  embeds: EmbedLayer;
   session: BoardSession | null;
   off: () => void;
 }
@@ -132,8 +135,6 @@ export function App() {
   const [showPerf, setShowPerf] = createSignal(false);
   const [help, setHelp] = createSignal(false);
   const [settings, setSettings] = createSignal(false);
-  /** Видео, которое сейчас играет на доске. */
-  const [playing, setPlaying] = createSignal<string | null>(null);
   /** Панель досок свёрнута — выезжает поверх доски, когда мышь у левого края. Запоминается. */
   const [collapsed, setCollapsed] = createSignal(readFlag('vaultboard:sidebar-collapsed'));
   const [peek, setPeek] = createSignal(false);
@@ -157,6 +158,7 @@ export function App() {
   const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | null>(null);
   const [exporting, setExporting] = createSignal<{ area: 'board' | 'selection'; selection: Rect | null } | null>(null);
   const [stylesOpen, setStylesOpen] = createSignal(false);
+  const [layersOpen, setLayersOpen] = createSignal(false);
   const [library, setLibrary] = createSignal<Record<string, StyleDef>>({});
   let filePicker!: HTMLInputElement;
 
@@ -334,23 +336,6 @@ export function App() {
     }
   }
 
-  /** Плеер видео поверх карточки: ездит вместе с доской (пересчитывается при каждом сдвиге камеры). */
-  function playerView(): { src: string; title: string; rect: Rect } | null {
-    const id = playing();
-    const cur = opened;
-    if (!id || !cur) return null;
-    zoom();
-    ui();
-    const item = cur.store.get(id);
-    if (item?.kind !== 'link') return null;
-    const src = embedUrl(item.url);
-    const r = cur.editor.screenRectOf(id);
-    if (!src || !r) return null;
-    // На экране — не меньше 320 точек в ширину, чтобы было что смотреть; пропорции 16:9.
-    const w = Math.max(r.w, 320);
-    return { src, title: item.title ?? item.url, rect: { x: r.x, y: r.y, w, h: w * 0.5625 } };
-  }
-
   // ---------- меню по правой кнопке ----------
 
   function setBackground(change: Partial<Background>) {
@@ -387,6 +372,22 @@ export function App() {
     ];
   }
 
+  /** Подменю «На слой»: все слои доски и новый слой из выделенного. */
+  function layerSubmenu(): MenuEntry[] {
+    const ed = opened!.editor;
+    const sel = ed.ui().selection.map((id) => opened!.store.get(id)?.layer ?? '');
+    return [
+      ...[...ed.layers()].reverse().map((l): MenuEntry => ({
+        label: l.name + (l.hidden ? ' (скрыт)' : l.locked ? ' (закреплён)' : ''),
+        checked: sel.length > 0 && sel.every((x) => x === l.id),
+        action: () => ed.moveSelectionToLayer(l.id),
+      })),
+      'sep',
+      { label: 'Новый слой из выделенного…', action: () => { const n = window.prompt('Название слоя, например «Фото»'); if (n?.trim()) ed.addLayer(n.trim(), true); } },
+      { label: 'Слои…', hint: 'Shift+L', action: () => setLayersOpen(true) },
+    ];
+  }
+
   /** Меню по объекту: открыть, буфер обмена, слои, стиль, экспорт выделенного, удаление. */
   function objectMenu(at: { x: number; y: number }): MenuEntry[] {
     const ed = opened!.editor;
@@ -406,7 +407,8 @@ export function App() {
     const link = single ? ed.selectedLink() : null;
     if (link) {
       items.push(
-        ...(embedUrl(link.url) ? [{ label: 'Смотреть здесь', hint: 'Enter', action: () => setPlaying(link.id) } as MenuEntry] : []),
+        ...(embedUrl(link.url) ? [{ label: 'Смотреть здесь', hint: 'щелчок', action: () => opened?.embeds.play(link.id) } as MenuEntry] : []),
+        ...(opened?.embeds.isStarted(link.id) ? [{ label: 'Остановить видео', action: () => opened?.embeds.stop(link.id) } as MenuEntry] : []),
         { label: embedUrl(link.url) ? 'Открыть в браузере' : 'Открыть ссылку', hint: embedUrl(link.url) ? undefined : 'Enter', action: () => window.open(link.url, '_blank', 'noopener') },
         { label: 'Обновить карточку', action: () => void unfurlLink(link.id, link.url) },
         { label: 'Копировать адрес', action: () => void navigator.clipboard.writeText(link.url) },
@@ -424,6 +426,7 @@ export function App() {
       { label: ui.selection.every((id) => opened!.store.get(id)?.locked) ? 'Открепить' : 'Закрепить', action: () => ed.toggleLock() },
       'sep',
       { label: 'Стиль', submenu: styleSubmenu() },
+      { label: 'На слой', submenu: layerSubmenu() },
     );
     if (single && text) items.push({ label: 'В документ', action: () => void convertToDoc() });
     items.push('sep', { label: 'Экспорт выделенного…', hint: 'PNG, JPG, PDF', action: () => openExport('selection') }, 'sep');
@@ -462,6 +465,7 @@ export function App() {
         ],
       },
       { label: 'Стили доски…', action: () => setStylesOpen(true) },
+      { label: 'Слои…', hint: 'Shift+L', action: () => setLayersOpen(true) },
       'sep',
       { label: 'Экспорт доски…', hint: 'PNG, JPG, PDF', action: () => openExport('board') },
     ];
@@ -489,6 +493,7 @@ export function App() {
     if (opened.session?.hasUnsaved) await opened.session.save();
     opened.session?.close();
     opened.editor.destroy();
+    opened.embeds.destroy();
     opened.off();
     opened = null;
     setEditor(undefined);
@@ -514,6 +519,7 @@ export function App() {
       queueMicrotask(() => {
         uiQueued = false;
         setUi(ed.ui());
+        opened?.embeds.update();
       });
     };
     ed.onNotice = flash;
@@ -523,11 +529,14 @@ export function App() {
     ed.onCreateDoc = (at) => void createDoc(at);
     ed.onQuickOpen = () => setQuick(true);
     ed.onUnfurl = (id, url) => void unfurlLink(id, url);
-    ed.onPlayEmbed = (id) => setPlaying(id);
+    const embeds = new EmbedLayer(host, v, store, () => ed.ui().selection);
+    ed.onPlayEmbed = (id) => embeds.play(id);
+    ed.onLayers = () => setLayersOpen(!layersOpen());
     ed.onContextMenu = (e) => setMenu({ x: e.clientX, y: e.clientY, items: e.target ? objectMenu(e.at) : boardMenu(e.at) });
     const off = store.onChange((ops) => {
       v.apply(ops);
       ed.storeChanged(ops);
+      embeds.itemsChanged();
     });
 
     let session: BoardSession | null = null;
@@ -541,7 +550,7 @@ export function App() {
       };
       restored = await session.start();
     }
-    opened = { store, editor: ed, session, off };
+    opened = { store, editor: ed, embeds, session, off };
     if (import.meta.env.DEV) Object.assign(window, { __store: store, __editor: ed });
     setEditor(ed);
     setUi(ed.ui());
@@ -624,6 +633,7 @@ export function App() {
     v.onCamera = () => {
       setZoom(v.cam.zoom);
       opened?.editor.cameraChanged();
+      opened?.embeds.update();
       const path = opened?.session?.path;
       if (path) {
         clearTimeout(cameraTimer);
@@ -763,13 +773,22 @@ export function App() {
           <div class="notice">{notice()}</div>
         </Show>
         <div class="corner">
+          <Show when={editor() && ui()}>
+            <button
+              class="help-btn layers-btn"
+              classList={{ on: layersOpen() }}
+              title="Слои (Shift+L)"
+              onClick={() => setLayersOpen(!layersOpen())}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2 14.5 5.5 8 9 1.5 5.5Z" /><path d="M1.5 8.5 8 12 14.5 8.5" /><path d="M1.5 11.5 8 15 14.5 11.5" /></svg>
+              {/* Когда слоёв несколько — на кнопке имя активного: сразу видно, куда лягут новые объекты. */}
+              {(ui(), editor()!.layers().length > 1 ? editor()!.layers().find((l) => l.id === editor()!.activeLayer)?.name : 'Слои')}
+            </button>
+          </Show>
           <button class="help-btn" title="Настройки" onClick={() => setSettings(true)}>⚙</button>
           <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
           <div class="zoom">{Math.round(zoom() * 100)}%</div>
         </div>
-        <Show when={playerView()}>
-          {(p) => <EmbedPlayer src={p().src} title={p().title} rect={p().rect} onClose={() => setPlaying(null)} />}
-        </Show>
         <Show when={settings()}>
           <SettingsDialog onClose={() => setSettings(false)} />
         </Show>
@@ -833,6 +852,9 @@ export function App() {
             }}
             onClose={() => setStylesOpen(false)}
           />
+        </Show>
+        <Show when={layersOpen() && editor() && ui()}>
+          <LayersPanel editor={editor()!} ui={ui()!} onClose={() => setLayersOpen(false)} />
         </Show>
         <Show when={viewer()}>
           <ImageViewer items={viewer()!.items} index={viewer()!.index} onClose={() => setViewer(null)} />
