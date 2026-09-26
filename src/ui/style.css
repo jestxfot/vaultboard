@@ -592,3 +592,8 @@ kbd { font: 500 11.5px/1.4 "Segoe UI", system-ui, sans-serif; background: #f4f4f
 .sb-kind { flex: none; width: 64px; font-size: 11px; color: var(--muted); }
 .sb-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-text mark { background: #ffe08a; color: inherit; border-radius: 3px; padding: 0 1px; }
+
+/* ---------- миникарта ---------- */
+.minimap { position: absolute; right: 10px; bottom: 50px; z-index: 4; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.1); overflow: hidden; line-height: 0; }
+.minimap canvas { cursor: pointer; }
+.help-btn.on { color: var(--accent); border-color: var(--accent); }

@@ -25,6 +25,7 @@ import { SettingsDialog } from './SettingsDialog.tsx';
 import { SetupDialog } from './SetupDialog.tsx';
 import { CHECK_UPDATE_EVENT, Updater } from './Updater.tsx';
 import { SearchBar } from './SearchBar.tsx';
+import { Minimap } from './Minimap.ts';
 import { searchBoardWith } from '../editor/search.ts';
 import type { Settings, SetupInfo, UpdateStatus } from '../io/vault.ts';
 import { EmbedLayer } from './EmbedLayer.ts';
@@ -64,6 +65,8 @@ interface Opened {
   comments: Comments;
   /** Булавки обсуждений поверх доски. */
   pins: CommentsLayer;
+  /** Миникарта в углу. */
+  minimap: Minimap;
   session: BoardSession | null;
   off: () => void;
 }
@@ -186,6 +189,13 @@ export function App() {
   const [layersOpen, setLayersOpen] = createSignal(false);
   /** Строка поиска по доске (Ctrl+F). */
   const [searchOpen, setSearchOpen] = createSignal(false);
+  /** Миникарта видна (по умолчанию да; выбор запоминается). */
+  const [minimapOn, setMinimapOnSignal] = createSignal(!readFlag('vaultboard:minimap-off'));
+  function setMinimapOn(on: boolean) {
+    setMinimapOnSignal(on);
+    writeFlag('vaultboard:minimap-off', !on);
+    opened?.minimap.setVisible(on);
+  }
   // Комментарии: открытое обсуждение, новое (точка на доске), список, «скрыть завершённые», имя автора.
   const [openThread, setOpenThread] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal<{ x: number; y: number } | null>(null);
@@ -591,6 +601,7 @@ export function App() {
     opened.editor.destroy();
     opened.embeds.destroy();
     opened.pins.destroy();
+    opened.minimap.destroy();
     setOpenThread(null);
     setDraft(null);
     opened.off();
@@ -630,6 +641,8 @@ export function App() {
     ed.onQuickOpen = () => setQuick(true);
     ed.onUnfurl = (id, url) => void unfurlLink(id, url);
     const embeds = new EmbedLayer(host, v, store, () => ed.ui().selection);
+    const minimap = new Minimap(host, v, store);
+    minimap.setVisible(minimapOn());
     const comments = new Comments(store, v);
     const pins = new CommentsLayer(host, v, comments);
     pins.hideDone = hideDone();
@@ -646,6 +659,7 @@ export function App() {
       ed.storeChanged(ops);
       embeds.itemsChanged();
       pins.update();
+      minimap.itemsChanged();
       // Обсуждение удалили (или отменили его создание) — закрыть окно.
       const open = openThread();
       if (open && !comments.get(open)) closeThread();
@@ -662,7 +676,7 @@ export function App() {
       };
       restored = await session.start();
     }
-    opened = { store, editor: ed, embeds, comments, pins, session, off };
+    opened = { store, editor: ed, embeds, comments, pins, minimap, session, off };
     if (import.meta.env.DEV) Object.assign(window, { __store: store, __editor: ed });
     setEditor(ed);
     setUi(ed.ui());
@@ -753,6 +767,7 @@ export function App() {
       opened?.editor.cameraChanged();
       opened?.embeds.update();
       opened?.pins.update();
+      opened?.minimap.cameraChanged();
       const path = opened?.session?.path;
       if (path) {
         clearTimeout(cameraTimer);
@@ -978,6 +993,9 @@ export function App() {
               {(ui(), editor()!.layers().length > 1 ? editor()!.layers().find((l) => l.id === editor()!.activeLayer)?.name : 'Слои')}
             </button>
           </Show>
+          <button class="help-btn" classList={{ on: minimapOn() }} title={minimapOn() ? 'Скрыть миникарту' : 'Показать миникарту'} onClick={() => setMinimapOn(!minimapOn())}>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="4" width="15" height="12" rx="1.5" /><rect x="9" y="8.5" width="6" height="5" rx=".8" fill="currentColor" fill-opacity=".25" /></svg>
+          </button>
           <button class="help-btn" title="Настройки" onClick={() => setSettings(true)}>⚙</button>
           <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
           <Show when={cursor()}>
