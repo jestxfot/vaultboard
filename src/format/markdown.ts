@@ -135,7 +135,8 @@ export function sanitize(html: string): string {
           !ALLOWED_ATTRS.has(name) ||
           (name === 'style' && /url\s*\(|expression|@import/.test(value)) ||
           (name === 'href' && !/^(https?:|mailto:|#)/.test(value)) ||
-          (name === 'src' && !value.startsWith('/api/file?'));
+          // Картинки — только файлы самой базы: у редактора с локального сервера, у сайта — опубликованные (f/…).
+          (name === 'src' && !value.startsWith('/api/file?') && !/^f\/[0-9a-f]{20}\.[a-z0-9]{1,8}$/.test(value));
         if (unsafe) child.removeAttribute(attr.name);
       }
       if (tag === 'a' && child.getAttribute('href')) child.setAttribute('target', '_blank');

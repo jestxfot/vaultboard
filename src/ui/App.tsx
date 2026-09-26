@@ -5,7 +5,8 @@ import { emptyBoard, parseBoard, serializeBoard } from '../format/board.ts';
 import { canvasFileRefs, importCanvas, parseCanvas } from '../format/canvasImport.ts';
 import { generateBoard } from '../bench/generate.ts';
 import { type PhaseResult, runAutopilot } from '../bench/autopilot.ts';
-import { type BoardEntry, vault } from '../io/vault.ts';
+import { type BoardEntry, SITE, vault } from '../io/vault.ts';
+import { PublishDialog } from './PublishDialog.tsx';
 import { BoardSession, type SaveState } from '../io/session.ts';
 import { BoardView } from '../render/BoardView.ts';
 import { Editor, type EditorUi } from '../editor/Editor.ts';
@@ -138,6 +139,8 @@ export function App() {
   const markdown = createMarkdown(files);
   let opened: Opened | null = null;
   let cameraTimer = 0;
+  /** Доска, для которой запоминается место на ней (у черновика и замера — нет). */
+  let cameraPath: string | null = null;
 
   const [view, setView] = createSignal<BoardView>();
   const [editor, setEditor] = createSignal<Editor>();
@@ -187,6 +190,8 @@ export function App() {
   const [exporting, setExporting] = createSignal<{ area: 'board' | 'selection'; selection: Rect | null } | null>(null);
   const [stylesOpen, setStylesOpen] = createSignal(false);
   const [layersOpen, setLayersOpen] = createSignal(false);
+  /** Окно публикации доски на сайт. */
+  const [publishing, setPublishing] = createSignal(false);
   /** Строка поиска по доске (Ctrl+F). */
   const [searchOpen, setSearchOpen] = createSignal(false);
   /** Миникарта видна (по умолчанию да; выбор запоминается). */
@@ -202,7 +207,7 @@ export function App() {
   const [commentsOpen, setCommentsOpen] = createSignal(false);
   const [hideDone, setHideDoneSignal] = createSignal(readFlag('vaultboard:show-done') ? false : true);
   const [author, setAuthor] = createSignal('Я');
-  void vault.getSettings().then((s) => setAuthor(s.author || s.defaultAuthor || 'Я'), () => undefined);
+  if (!SITE) void vault.getSettings().then((s) => setAuthor(s.author || s.defaultAuthor || 'Я'), () => undefined);
   const [library, setLibrary] = createSignal<Record<string, StyleDef>>({});
   let filePicker!: HTMLInputElement;
 
@@ -348,6 +353,10 @@ export function App() {
   /** Переход по [[ссылке]] из панели. Нет такой заметки — создаём рядом с текущей, как Obsidian. */
   async function navigate(target: string, resolved: string | null) {
     let path = resolved ?? files.resolve(target, panel()?.path ?? '');
+    if (!path && SITE) {
+      flash(`Заметка «${target.split('|')[0]}» не опубликована`);
+      return;
+    }
     if (!path) {
       const from = panel()?.path ?? '';
       const dir = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : '';
@@ -659,6 +668,7 @@ export function App() {
       { label: hideDone() ? 'Показать завершённые комментарии' : 'Скрыть завершённые комментарии', action: () => setHideDone(!hideDone()) },
       'sep',
       { label: 'Экспорт доски…', hint: 'PNG, JPG, PDF', action: () => openExport('board') },
+      { label: 'Опубликовать на сайт…', disabled: !opened?.session, action: () => setPublishing(true) },
     ];
   }
 
@@ -705,8 +715,10 @@ export function App() {
     v.paths = new BoardPaths(path ? boardFolderOf(path) : '');
     v.load(doc, !cam);
     if (cam) v.setCamera(cam);
+    cameraPath = path;
 
     const ed = new Editor(store, v, host, perf);
+    ed.readOnly = SITE;
     let uiQueued = false;
     ed.onUi = () => {
       if (uiQueued) return;
@@ -726,6 +738,7 @@ export function App() {
     ed.onQuickOpen = () => setQuick(true);
     ed.onUnfurl = (id, url) => void unfurlLink(id, url);
     const embeds = new EmbedLayer(host, v, store, () => ed.ui().selection);
+    embeds.sticky = SITE;
     const minimap = new Minimap(host, v, store);
     minimap.setVisible(minimapOn());
     const comments = new Comments(store, v);
@@ -752,7 +765,8 @@ export function App() {
 
     let session: BoardSession | null = null;
     let restored = 0;
-    if (path) {
+    // На сайте доска только читается: ни сохранения, ни истории отмены.
+    if (path && !SITE) {
       session = new BoardSession(store, path, mtime);
       session.onState = (st) => {
         setSave(st);
@@ -766,6 +780,7 @@ export function App() {
     setEditor(ed);
     setUi(ed.ui());
     setCurrent(path ?? note);
+    if (SITE && path) document.title = `${boardTitleOf(path)} — vaultboard`;
     setError('');
     const historyNote = restored ? ` · история: ${restored} шагов назад` : '';
     setStatus(`${note} · ${doc.items.length} объектов · открыто за ${(performance.now() - started).toFixed(0)} мс${historyNote}`);
@@ -853,7 +868,7 @@ export function App() {
       opened?.embeds.update();
       opened?.pins.update();
       opened?.minimap.cameraChanged();
-      const path = opened?.session?.path;
+      const path = cameraPath;
       if (path) {
         clearTimeout(cameraTimer);
         cameraTimer = window.setTimeout(() => saveCamera(path, v.cam), 400);
@@ -876,12 +891,22 @@ export function App() {
       if ((openThread() || draft()) && !(e.target as HTMLElement).closest('.comment-pin')) closeThread();
     }, true);
     v.setDocs(docs, markdown);
-    // Папка с досками ещё не выбрана (новый компьютер) — сначала первая настройка, остальное после неё.
-    const info = await vault.setup().catch(() => null);
-    if (info && !info.root) setSetup(info);
-    else {
+    if (SITE) {
+      // Сайт: список досок и файлов — из манифеста рядом со страницей.
+      try {
+        await vault.init();
+      } catch (err) {
+        setError((err as Error).message);
+      }
       void files.refresh().catch(() => undefined);
-      void vault.getLibrary().then(setLibrary).catch(() => undefined);
+    } else {
+      // Папка с досками ещё не выбрана (новый компьютер) — сначала первая настройка, остальное после неё.
+      const info = await vault.setup().catch(() => null);
+      if (info && !info.root) setSetup(info);
+      else {
+        void files.refresh().catch(() => undefined);
+        void vault.getLibrary().then(setLibrary).catch(() => undefined);
+      }
     }
     if (import.meta.env.DEV) Object.assign(window, { __view: v, __docs: docs, __files: files });
 
@@ -910,7 +935,7 @@ export function App() {
       v.destroy();
     });
 
-    void watchOutsideChanges();
+    if (!SITE) void watchOutsideChanges();
     const params = new URLSearchParams(location.search);
     if (!setup()) await refreshBoards().catch((err: Error) => setError(err.message));
     if (params.get('bench')) await openBench(Number(params.get('bench')), params.get('auto') === '1');
@@ -924,6 +949,7 @@ export function App() {
         // Нет доступа к хранилищу браузера — начнём с черновика.
       }
       if (last && boards().some((b) => b.path === last)) await openBoard(last);
+      else if (SITE && boards().length) await openBoard(boards()[0].path);
       else await mount(emptyBoard(), null, 'new', 'Черновик (не сохраняется) — создай или открой доску слева', performance.now());
     }
   });
@@ -936,11 +962,12 @@ export function App() {
         onMouseLeave={() => collapsed() && setPeek(false)}
       >
         <div class="side-head">
-          <button class="side-brand" title="Мастер настройки: папка с досками, имя, обновления" onClick={() => void openWizard()}>
+          <button class="side-brand" title={SITE ? 'vaultboard' : 'Мастер настройки: папка с досками, имя, обновления'} onClick={() => !SITE && void openWizard()}>
             <span class="logo">vb</span>
             <span class="side-title">
               <b>
                 vaultboard{' '}
+                <Show when={!SITE}>
                 <span
                   class="side-version"
                   role="button"
@@ -953,11 +980,12 @@ export function App() {
                 >
                   v{version()} ⟳
                 </span>
+                </Show>
                 <Show when={update()}>
                   {(u) => <span class="side-update" title={`Вышла ${u().latest!.tag} — поставится при следующем запуске`}>↑ {u().latest!.tag}</span>}
                 </Show>
               </b>
-              <span class="root" title={root()}>{root()}</span>
+              <span class="root" title={root()}>{SITE ? 'Опубликованные доски · только просмотр' : root()}</span>
             </span>
           </button>
           <button class="icon-btn" title={collapsed() ? 'Закрепить панель' : 'Свернуть панель — она будет выезжать у левого края'} onClick={toggleSidebar}>
@@ -969,7 +997,9 @@ export function App() {
         </div>
         <div class="section">
           Доски
-          <button class="section-btn" title="Новая доска" onClick={() => setNewName(newName() === null ? 'Доски/Новая доска' : null)}>+</button>
+          <Show when={!SITE}>
+            <button class="section-btn" title="Новая доска" onClick={() => setNewName(newName() === null ? 'Доски/Новая доска' : null)}>+</button>
+          </Show>
         </div>
         <Show when={newName() !== null}>
           <form class="new-board" onSubmit={(e) => { e.preventDefault(); void createBoard(newName()!); }}>
@@ -994,13 +1024,20 @@ export function App() {
             )}
           </For>
         </div>
+        <Show when={SITE}>
+          <div class="site-foot">
+            Доски только для просмотра: двигай мышью, колесо — зум, щелчок по заметке или фото — открыть, Ctrl+F — поиск.
+            <br />
+            Сделано в <a href="https://github.com/jestxfot/vaultboard" target="_blank" rel="noopener">vaultboard</a>
+          </div>
+        </Show>
       </aside>
       <main class="stage">
         <div class="board-host" ref={host} />
         <Show when={collapsed() && !peek()}>
           <div class="sidebar-edge" onMouseEnter={() => setPeek(true)} title="Доски" />
         </Show>
-        <Show when={editor() && ui()}>
+        <Show when={editor() && ui() && !SITE}>
           <Toolbar
             editor={editor()!}
             ui={ui()!}
@@ -1021,6 +1058,9 @@ export function App() {
             <button class="icon-btn topbar-btn" title="Доски" onClick={() => setPeek(!peek())}>☰</button>
           </Show>
           <span class="title">{current() || 'Выбери доску слева'}</span>
+          <Show when={!SITE && /\.board$/i.test(current())}>
+            <button class="topbar-publish" title="Опубликовать доску на сайт — только для просмотра" onClick={() => setPublishing(true)}>Опубликовать</button>
+          </Show>
           <Show when={save()}>
             <span class="save" classList={{ bad: save()!.kind === 'error' || save()!.kind === 'conflict' }}>{saveLabel(save()!)}</span>
           </Show>
@@ -1042,7 +1082,7 @@ export function App() {
           <div class="notice">{notice()}</div>
         </Show>
         <div class="corner">
-          <Show when={editor() && ui()}>
+          <Show when={editor() && ui() && !SITE}>
             {(() => {
               const threads = () => (ui(), opened?.comments.threads ?? []);
               const open = () => threads().filter((t) => !isDone(t)).length;
@@ -1067,7 +1107,7 @@ export function App() {
               );
             })()}
           </Show>
-          <Show when={editor() && ui()}>
+          <Show when={editor() && ui() && !SITE}>
             <button
               class="help-btn layers-btn"
               classList={{ on: layersOpen() }}
@@ -1082,8 +1122,10 @@ export function App() {
           <button class="help-btn" classList={{ on: minimapOn() }} title={minimapOn() ? 'Скрыть миникарту' : 'Показать миникарту'} onClick={() => setMinimapOn(!minimapOn())}>
             <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="4" width="15" height="12" rx="1.5" /><rect x="9" y="8.5" width="6" height="5" rx=".8" fill="currentColor" fill-opacity=".25" /></svg>
           </button>
-          <button class="help-btn" title="Настройки" onClick={() => setSettings(true)}>⚙</button>
-          <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
+          <Show when={!SITE}>
+            <button class="help-btn" title="Настройки" onClick={() => setSettings(true)}>⚙</button>
+            <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
+          </Show>
           <Show when={cursor()}>
             {(c) => (
               <div class="coords" title="Координаты на доске: центр 0, 0 отмечен крестиком">
@@ -1117,6 +1159,7 @@ export function App() {
             />
           )}
         </Show>
+        <Show when={!SITE}>
         <Updater
           onStatus={setUpdate}
           onNotice={flash}
@@ -1125,6 +1168,10 @@ export function App() {
             if (opened?.session?.hasUnsaved) await opened.session.save();
           }}
         />
+        </Show>
+        <Show when={publishing() && /\.board$/i.test(current())}>
+          <PublishDialog board={current()} onClose={() => setPublishing(false)} onDone={flash} />
+        </Show>
         <Show when={settings()}>
           <SettingsDialog onClose={() => setSettings(false)} onSaved={(s) => s.author && setAuthor(s.author)} />
         </Show>
@@ -1150,6 +1197,7 @@ export function App() {
             docs={docs}
             files={files}
             markdown={markdown}
+            readOnly={SITE}
             onMode={(mode) => setPanel({ ...panel()!, mode })}
             onNavigate={(target, resolved) => void navigate(target, resolved)}
             onClose={() => setPanel(null)}

@@ -11,6 +11,8 @@ import { snapRect } from '../src/editor/snap.ts';
 import { resolveLook } from '../src/model/look.ts';
 import { searchBoard } from '../src/editor/search.ts';
 import { alignShifts, distributeShifts, tidyShifts } from '../src/editor/arrange.ts';
+import { publicBoard } from '../server/publish.ts';
+import { embedTargets, LinkResolver } from '../src/format/links.ts';
 
 let failed = 0;
 function check(ok: boolean, message: string): void {
@@ -293,6 +295,24 @@ console.log('\nВыравнивание и группы');
   fresh.restoreHistory(back!.undo, back!.redo);
   fresh.undo();
   check(!fresh.get('a')?.group, 'и после перезапуска — по журналу с диска');
+}
+
+console.log('\nПубликация');
+{
+  const doc = emptyBoard();
+  doc.layers = [{ id: '', name: 'Основной' }, { id: 'draft', name: 'Черновик', hidden: true }];
+  doc.items.push(makeSticky('seen', 0, 0), { ...makeSticky('secret', 300, 0), layer: 'draft' });
+  doc.items.push(makeLine('l1', { item: 'seen' }, { item: 'secret' }, 'straight', 'arrow'), makeLine('l2', { item: 'seen' }, { x: 500, y: 500 }, 'straight', 'arrow'));
+  doc.comments.push({ id: 't', x: 0, y: 0, messages: [] });
+  const { doc: pub, hiddenItems } = publicBoard(doc);
+  check(pub.items.map((i) => i.id).join() === 'seen,l2', `на сайт не уходят объекты скрытых слоёв и линии к ним (${pub.items.map((i) => i.id).join()})`);
+  check(hiddenItems === 2 && pub.comments.length === 0 && !pub.layers!.some((l) => l.hidden), 'обсуждений и скрытых слоёв в опубликованной доске нет');
+  check(doc.items.length === 4 && doc.comments.length === 1, 'сама доска при этом не меняется');
+
+  const links = new LinkResolver(['Доски/Тест/фото/кадр.png', 'Canon/Укус 83.md', 'Доски/Тест/Укус 83.md']);
+  check(links.resolve('кадр.png') === 'Доски/Тест/фото/кадр.png', 'вставка находится по имени файла в любой папке');
+  check(links.resolve('Укус 83', 'Доски/Тест/доска.board') === 'Доски/Тест/Укус 83.md', 'из одноимённых — ближайшая к текущей');
+  check(embedTargets('текст ![[кадр.png|300]] и [[Укус 83]] ещё ![[схема.jpg]]').join() === 'кадр.png,схема.jpg', 'вставки ![[…]] без подписи и размера, обычные ссылки не считаются');
 }
 
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');

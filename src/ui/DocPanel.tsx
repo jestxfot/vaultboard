@@ -45,6 +45,8 @@ export function DocPanel(props: {
   docs: DocCache;
   files: FileIndex;
   markdown: Markdown;
+  /** Опубликованная доска: заметку можно только читать. */
+  readOnly?: boolean;
   onMode: (mode: DocMode) => void;
   onNavigate: (target: string, resolved: string | null) => void;
   onClose: () => void;
@@ -179,14 +181,16 @@ export function DocPanel(props: {
           <b>{basename(props.path)}</b>
           <span class="doc-path" title={props.path}>{props.path}</span>
         </div>
-        <div class="doc-modes">
-          <button classList={{ active: props.mode === 'read' }} onClick={() => props.onMode('read')}>Чтение</button>
-          <button classList={{ active: props.mode === 'edit' }} onClick={() => props.onMode('edit')}>Правка</button>
-        </div>
+        <Show when={!props.readOnly}>
+          <div class="doc-modes">
+            <button classList={{ active: props.mode === 'read' }} onClick={() => props.onMode('read')}>Чтение</button>
+            <button classList={{ active: props.mode === 'edit' }} onClick={() => props.onMode('edit')}>Правка</button>
+          </div>
+        </Show>
         <Show
-          when={okTarget()}
+          when={!props.readOnly && okTarget()}
           fallback={
-            <Show when={target()?.kind === 'outside'}>
+            <Show when={!props.readOnly && target()?.kind === 'outside'}>
               <span
                 class="doc-btn disabled"
                 title="Эта заметка не лежит ни в одном хранилище Obsidian — он её не откроет. Добавь её папку как хранилище в Obsidian."

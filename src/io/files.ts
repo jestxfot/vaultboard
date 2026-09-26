@@ -1,20 +1,6 @@
 // Файлы базы глазами доски: поиск заметок, разрешение [[вики-ссылок]] и кэш текстов документов.
 import { vault } from './vault.ts';
-
-function basename(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1);
-}
-
-function dirname(path: string): string {
-  const i = path.lastIndexOf('/');
-  return i < 0 ? '' : path.slice(0, i);
-}
-
-/** Имя, по которому Obsidian находит файл в [[ссылке]]: у заметок без .md, у остальных — с расширением. */
-function linkName(path: string): string {
-  const name = basename(path).toLowerCase();
-  return name.endsWith('.md') ? name.slice(0, -3) : name;
-}
+import { LinkResolver, linkName } from '../format/links.ts';
 
 const EN = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
 const RU = 'йцукенгшщзхъфывапролджэячсмитьбюё';
@@ -33,7 +19,7 @@ export function switchLayout(text: string): string {
 
 export class FileIndex {
   private paths: string[] = [];
-  private readonly byName = new Map<string, string[]>();
+  private links = new LinkResolver([]);
   onChange: (() => void) | null = null;
 
   get notes(): string[] {
@@ -43,13 +29,7 @@ export class FileIndex {
   async refresh(): Promise<void> {
     const { files } = await vault.listFiles();
     this.paths = files.map((f) => f.path);
-    this.byName.clear();
-    for (const p of this.paths) {
-      const key = linkName(p);
-      const list = this.byName.get(key);
-      if (list) list.push(p);
-      else this.byName.set(key, [p]);
-    }
+    this.links = new LinkResolver(this.paths);
     this.onChange?.();
   }
 
@@ -57,27 +37,9 @@ export class FileIndex {
     return this.paths.includes(path);
   }
 
-  /**
-   * Куда ведёт [[ссылка]], по правилам Obsidian: `Заметка`, `Папка/Заметка`, `фото.png`,
-   * с хвостом `#заголовок` или `^блок`. Если одноимённых несколько — ближайшая к текущей заметке, потом самая короткая.
-   */
+  /** Куда ведёт [[ссылка]], по правилам Obsidian (см. format/links.ts). */
   resolve(target: string, from = ''): string | null {
-    const clean = target.split('|')[0].split('#')[0].split('^')[0].trim();
-    if (!clean) return null;
-    const lower = clean.toLowerCase().replace(/\\/g, '/');
-    if (lower.includes('/')) {
-      const withMd = lower.endsWith('.md') || /\.[a-z0-9]{2,5}$/.test(lower) ? lower : `${lower}.md`;
-      return this.paths.find((p) => p.toLowerCase() === withMd || p.toLowerCase().endsWith(`/${withMd}`)) ?? null;
-    }
-    const key = lower.endsWith('.md') ? lower.slice(0, -3) : lower;
-    const list = this.byName.get(key);
-    if (!list?.length) return null;
-    if (list.length === 1) return list[0];
-    const here = dirname(from);
-    return [...list].sort((a, b) => {
-      const sa = dirname(a) === here ? 0 : 1, sb = dirname(b) === here ? 0 : 1;
-      return sa - sb || a.length - b.length;
-    })[0];
+    return this.links.resolve(target, from);
   }
 
   /**

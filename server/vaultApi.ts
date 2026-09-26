@@ -10,6 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts';
+import { gitRemote, isGitRepo, planBoard, publishBoard, readManifest, unpublishBoard } from './publish.ts';
 import { BoardFormatError, parseBoard } from '../src/format/board.ts';
 import { boardFolderOf, historyPathOf } from '../src/model/paths.ts';
 import { unfurl } from './unfurl.ts';
@@ -66,6 +67,8 @@ interface Settings {
   vaultRoot?: string;
   /** Обновляться на новые релизы при запуске. Нет поля — да. */
   autoUpdate?: boolean;
+  /** Папка сайта, куда публикуются доски (её выкладывают на Vercel). */
+  siteDir?: string;
 }
 
 /** Настройки читаются на каждый запрос (нужна папка базы) — держим в памяти, перечитываем после записи. */
@@ -107,6 +110,12 @@ async function fsRoots(): Promise<{ name: string; path: string }[]> {
 
 /** Кэш превью фото — вне базы, чтобы не раздувать её и git. Можно удалить целиком: превью сделаются заново. */
 const PREVIEW_DIR = path.join(process.env.LOCALAPPDATA ?? os.tmpdir(), 'vaultboard', 'cache', 'previews');
+
+/** Файл превью в кэше. Ключ зависит от времени и размера оригинала: поменялся файл — превью пересоздастся само. */
+function previewPath(absRoot: string, rel: string, st: { mtimeMs: number; size: number }, level: string): string {
+  const key = createHash('sha1').update(`${absRoot}|${rel}|${st.mtimeMs}|${st.size}|${level}`).digest('hex');
+  return path.join(PREVIEW_DIR, `${key}.webp`);
+}
 
 /** Имя файла без символов, запрещённых в Windows. */
 function safeName(name: string): string {
@@ -344,6 +353,23 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     return s.vaultRoot ? path.resolve(s.vaultRoot) : null;
   }
 
+  /** Что в папке сайта: опубликованные доски, git и куда он отправляет. */
+  async function siteInfo(dir: string, board: string) {
+    if (!dir) return { dir: '', exists: false, boards: [], published: null, git: false, remote: null };
+    const abs = path.resolve(dir);
+    const st = await fs.stat(abs).catch(() => null);
+    const manifest = st?.isDirectory() ? await readManifest(abs) : null;
+    const git = !!st?.isDirectory() && isGitRepo(abs);
+    return {
+      dir: abs,
+      exists: !!st?.isDirectory(),
+      boards: manifest?.boards.map((b) => ({ path: b.path, title: b.title, published: b.published })) ?? [],
+      published: manifest?.boards.find((b) => b.path === board)?.published ?? null,
+      git,
+      remote: git ? gitRemote(abs) : null,
+    };
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
 
@@ -448,6 +474,10 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
           else delete next.author;
         }
         if ('autoUpdate' in raw) next.autoUpdate = raw.autoUpdate !== false;
+        if ('siteDir' in raw) {
+          if (raw.siteDir?.trim()) next.siteDir = path.resolve(raw.siteDir.trim());
+          else delete next.siteDir;
+        }
         if (raw.vaultRoot) {
           const abs = path.resolve(raw.vaultRoot);
           if (raw.createRoot) await fs.mkdir(abs, { recursive: true });
@@ -656,9 +686,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       if (level !== '0' && level !== '1') return sendJson(res, 400, { error: 'Неверный уровень превью' });
       const st = await fs.stat(toAbsolute(absRoot, rel)).catch(() => null);
       if (!st) return sendJson(res, 404, { error: `Нет файла: ${rel}` });
-      // Ключ зависит от времени и размера оригинала: поменялся файл — превью пересоздастся само.
-      const key = createHash('sha1').update(`${absRoot}|${rel}|${st.mtimeMs}|${st.size}|${level}`).digest('hex');
-      const file = path.join(PREVIEW_DIR, `${key}.webp`);
+      const file = previewPath(absRoot, rel, st, level);
       if (req.method === 'GET') {
         const pst = await fs.stat(file).catch(() => null);
         if (!pst) return sendJson(res, 404, { error: 'Превью ещё нет' });
@@ -724,6 +752,69 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
         await fs.rename(tmp, abs);
         return sendJson(res, 200, { ok: true });
       }
+    }
+
+    // ---------- публикация на сайт ----------
+
+    if (req.method === 'GET' && url.pathname === '/publish/plan') {
+      // Что уйдёт на сайт с этой доской — показываем списком до публикации.
+      const board = url.searchParams.get('board') ?? '';
+      if (!/\.board$/i.test(board)) return sendJson(res, 400, { error: 'Опубликовать можно сохранённую доску .board' });
+      const { doc: _doc, ...plan } = await planBoard(absRoot, board);
+      const dir = url.searchParams.get('dir') || (await readSettings()).siteDir || '';
+      return sendJson(res, 200, { plan, site: await siteInfo(dir, board) });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/publish/site') {
+      const dir = url.searchParams.get('dir') ?? '';
+      return sendJson(res, 200, await siteInfo(dir, url.searchParams.get('board') ?? ''));
+    }
+
+    if (req.method === 'POST' && (url.pathname === '/publish' || url.pathname === '/publish/remove')) {
+      const body = JSON.parse(await readBody(req)) as { board: string; dir: string; push?: boolean };
+      if (!body.dir?.trim()) return sendJson(res, 400, { error: 'Выбери папку сайта' });
+      const dir = path.resolve(body.dir.trim());
+      await writeSettings({ ...(await readSettings()), siteDir: dir });
+      if (url.pathname === '/publish/remove') return sendJson(res, 200, await unpublishBoard(dir, body.board, !!body.push));
+      const result = await publishBoard({
+        root: absRoot,
+        board: body.board,
+        siteDir: dir,
+        appDir: path.join(projectDir, 'dist'),
+        push: !!body.push,
+        previewOf: async (rel, level) => {
+          const st = await fs.stat(toAbsolute(absRoot, rel)).catch(() => null);
+          if (!st) return null;
+          const file = previewPath(absRoot, rel, st, String(level));
+          return (await fs.stat(file).catch(() => null)) ? file : null;
+        },
+      });
+      logLine(`[публикация] ${body.board} → ${dir}: файлов ${result.files}, скопировано ${result.copied}, удалено ${result.removed}${result.git ? `, git: ${result.git.ok ? 'отправлено' : 'ошибка'}` : ''}`);
+      return sendJson(res, 200, result);
+    }
+
+    if (req.method === 'GET' && (url.pathname === '/site' || url.pathname.startsWith('/site/'))) {
+      // Посмотреть сайт у себя до отправки: папка сайта отдаётся как есть (только чтение).
+      const dir = (await readSettings()).siteDir;
+      if (!dir) return sendJson(res, 404, { error: 'Папка сайта ещё не выбрана' });
+      if (url.pathname === '/site') {
+        res.statusCode = 302;
+        res.setHeader('Location', 'site/');
+        res.end();
+        return;
+      }
+      const rel = decodeURIComponent(url.pathname.slice('/site/'.length)) || 'index.html';
+      const abs = toAbsolute(dir, rel);
+      const st = await fs.stat(abs).catch(() => null);
+      if (!st?.isFile()) return sendJson(res, 404, { error: `Нет файла: ${rel}` });
+      const ext = path.extname(abs).toLowerCase();
+      const type = ext === '.html' ? 'text/html; charset=utf-8' : ext === '.js' ? 'text/javascript' : ext === '.css' ? 'text/css' : ext === '.woff2' ? 'font/woff2' : MIME[ext] ?? 'application/octet-stream';
+      res.statusCode = 200;
+      res.setHeader('Content-Type', type);
+      res.setHeader('Content-Length', String(st.size));
+      res.setHeader('Cache-Control', 'no-cache');
+      createReadStream(abs).pipe(res);
+      return;
     }
 
     if (req.method === 'POST' && url.pathname === '/resolve') {

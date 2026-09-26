@@ -1,5 +1,7 @@
-// Доступ к файлам базы из интерфейса. Сейчас — через локальный сервер,
-// в настольной версии этот модуль заменится прямым доступом к диску.
+// Доступ к файлам базы из интерфейса. Два режима с одним и тем же набором функций:
+// - редактор — через локальный сервер (в настольной версии — прямой доступ к диску);
+// - сайт (опубликованные доски, только просмотр) — готовые файлы рядом со страницей, по манифесту site.json.
+// Остальной код не знает, в каком он режиме, кроме мест, где прячется правка (см. SITE).
 
 export interface BoardEntry {
   path: string;
@@ -22,6 +24,8 @@ export interface Settings {
   author?: string;
   vaultRoot?: string;
   autoUpdate?: boolean;
+  /** Папка сайта для публикации досок. */
+  siteDir?: string;
   /** Имя пользователя системы — имя в комментариях по умолчанию. */
   defaultAuthor?: string;
   /** Папка базы задана переменной VAULT_ROOT (разработка) — в настройках её не поменять. */
@@ -43,6 +47,37 @@ export interface DirList {
   home: string;
 }
 
+/** Что уйдёт на сайт с доской (см. server/publish.ts). */
+export interface PublishPlan {
+  board: string;
+  title: string;
+  files: { path: string; kind: 'board' | 'image' | 'doc' | 'file' | 'link' | 'embed'; size: number; outside: boolean }[];
+  missing: string[];
+  total: number;
+  hiddenItems: number;
+  comments: number;
+}
+
+export interface SiteInfo {
+  dir: string;
+  exists: boolean;
+  boards: { path: string; title: string; published: string }[];
+  /** Когда эта доска публиковалась в последний раз (null — ещё нет). */
+  published: string | null;
+  git: boolean;
+  remote: string | null;
+}
+
+export interface PublishResult {
+  title: string;
+  files: number;
+  copied: number;
+  copiedBytes: number;
+  removed: number;
+  missing: string[];
+  git: { ok: boolean; output: string } | null;
+}
+
 export interface UpdateStatus {
   current: string;
   git: boolean;
@@ -53,7 +88,10 @@ export interface UpdateStatus {
   canApply: boolean;
 }
 
-export const vault = {
+const serverVault = {
+  /** Подготовиться к работе (у сайта — прочитать манифест). */
+  init: async (): Promise<void> => undefined,
+
   listBoards: () => request<{ root: string; boards: BoardEntry[] }>('/api/boards'),
 
   fileUrl: (path: string) => `/api/file?path=${encodeURIComponent(path)}`,
@@ -187,4 +225,103 @@ export const vault = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ from, refs }),
     }),
+
+  /** Что уйдёт на сайт с доской и что уже лежит в папке сайта (`dir` пусто — папка из настроек). */
+  publishPlan: (board: string, dir = '') =>
+    request<{ plan: PublishPlan; site: SiteInfo }>(`/api/publish/plan?board=${encodeURIComponent(board)}&dir=${encodeURIComponent(dir)}`),
+
+  siteInfo: (dir: string, board: string) => request<SiteInfo>(`/api/publish/site?dir=${encodeURIComponent(dir)}&board=${encodeURIComponent(board)}`),
+
+  publish: (board: string, dir: string, push: boolean) =>
+    request<PublishResult>('/api/publish', { method: 'POST', body: JSON.stringify({ board, dir, push }) }),
+
+  unpublish: (board: string, dir: string, push: boolean) =>
+    request<{ removed: number; git: { ok: boolean; output: string } | null }>('/api/publish/remove', { method: 'POST', body: JSON.stringify({ board, dir, push }) }),
 };
+
+// ---------- сайт: только просмотр ----------
+
+/** Страница — опубликованный сайт (пометку ставит публикация в index.html). */
+export const SITE = typeof document !== 'undefined' && !!document.querySelector('meta[name="vaultboard-site"]');
+
+interface SiteManifest {
+  format: string;
+  updated: string;
+  boards: { path: string; title: string; published: string; files: string[] }[];
+  files: Record<string, { url: string; size: number; previews?: (string | null)[] }>;
+}
+
+let manifest: SiteManifest = { format: '', updated: '', boards: [], files: {} };
+const readOnly = (): never => {
+  throw new Error('Это опубликованная доска — только просмотр');
+};
+/** Запрос, который на сайте никогда не ответит (долгие запросы редактора там не нужны). */
+const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
+
+const siteVault: typeof serverVault = {
+  async init() {
+    const res = await fetch('site.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error('Не удалось загрузить список досок сайта');
+    manifest = (await res.json()) as SiteManifest;
+  },
+  listBoards: async () => ({
+    root: '',
+    boards: manifest.boards.map((b) => ({ path: b.path, kind: 'board' as const, size: manifest.files[b.path]?.size ?? 0, mtime: Date.parse(b.published) || 0 })),
+  }),
+  // Неопубликованный файл — адрес, которого нет: картинка просто не загрузится.
+  fileUrl: (path) => manifest.files[path]?.url ?? `f/-${encodeURIComponent(path)}`,
+  async readText(path) {
+    const res = await fetch(siteVault.fileUrl(path));
+    if (!res.ok) throw new Error(`Не опубликовано: ${path}`);
+    return res.text();
+  },
+  async readWithMtime(path) {
+    return { text: await siteVault.readText(path), mtime: 0 };
+  },
+  writeBoard: async () => readOnly(),
+  listFiles: async () => ({ files: Object.entries(manifest.files).map(([path, f]) => ({ path, size: f.size, mtime: 0 })) }),
+  writeDoc: async () => readOnly(),
+  mtimeOf: async (path) => (manifest.files[path] ? 0 : null),
+  trash: async () => readOnly(),
+  readHistory: async () => '',
+  appendHistory: async () => undefined,
+  upload: async () => readOnly(),
+  // Готового превью нет — приложение сделает его само из оригинала (и никуда не сохранит).
+  previewUrl: (path, level) => manifest.files[path]?.previews?.[level] ?? `p/-${encodeURIComponent(path)}`,
+  putPreview: async () => undefined,
+  getLibrary: async () => ({}),
+  putLibrary: async () => undefined,
+  unfurl: async () => readOnly(),
+  obsidianVaults: async () => ({ root: '', vaults: null }),
+  getSettings: async () => ({}),
+  putSettings: async () => undefined,
+  changesWait: () => never(),
+  setup: async () => ({ root: 'site', fixed: true, defaultAuthor: '', obsidian: false, suggestions: [] }),
+  dirs: async () => readOnly(),
+  mkdir: async () => readOnly(),
+  updateStatus: () => never(),
+  updateWait: () => never(),
+  applyUpdate: async () => readOnly(),
+  async resolve(from, refs) {
+    // Как на сервере: от папки файла вверх до корня — первый существующий путь.
+    const out: Record<string, string | null> = {};
+    for (const ref of refs) {
+      out[ref] = null;
+      for (let dir = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : ''; ; dir = dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) : '') {
+        const p = dir ? `${dir}/${ref}` : ref;
+        if (manifest.files[p]) {
+          out[ref] = p;
+          break;
+        }
+        if (!dir) break;
+      }
+    }
+    return out;
+  },
+  publishPlan: async () => readOnly(),
+  siteInfo: async () => readOnly(),
+  publish: async () => readOnly(),
+  unpublish: async () => readOnly(),
+};
+
+export const vault: typeof serverVault = SITE ? siteVault : serverVault;

@@ -36,6 +36,8 @@ export class EmbedLayer {
   private readonly root: HTMLDivElement;
   private readonly live = new Map<string, Live>();
   private active: string | null = null;
+  /** Активный плеер не зависит от выделения (опубликованная доска, где выделять нечего). */
+  sticky = false;
   private rebaseTimer = 0;
   private readonly view: BoardView;
   private readonly store: BoardStore;
@@ -97,7 +99,8 @@ export class EmbedLayer {
     if (!this.live.size) return;
     const sel = this.selection();
     // Щелчок мимо видео (выделили другое или ничего) — плеер снова прозрачен для мыши, но играет дальше.
-    if (this.active && !(sel.length === 1 && sel[0] === this.active)) this.active = null;
+    // На сайте выделения нет: запущенный плеер остаётся активным, пока не запустят другой.
+    if (!this.sticky && this.active && !(sel.length === 1 && sel[0] === this.active)) this.active = null;
 
     const { w: sw, h: sh } = this.view.screen;
     const zoom = this.view.cam.zoom;

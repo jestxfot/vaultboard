@@ -99,7 +99,8 @@ interface PointerState {
 }
 
 type Gesture =
-  | { kind: 'pan'; lastX: number; lastY: number; moved: boolean; clearOnClick: boolean; downX: number; downY: number; menu: boolean; clientX: number; clientY: number }
+  /** `open` — на сайте: щелчок без движения открывает объект под курсором. */
+  | { kind: 'pan'; lastX: number; lastY: number; moved: boolean; clearOnClick: boolean; downX: number; downY: number; menu: boolean; clientX: number; clientY: number; open: boolean }
   /** `fresh` — объект выделили этим же нажатием (тогда отпускание не «проваливается» внутрь группы). */
   | { kind: 'press'; id: string; downX: number; downY: number; start: Point; toggleOff: boolean; alt: boolean; fresh: boolean }
   | { kind: 'move'; start: Point; boxes: Map<string, Point>; lines: Map<string, LineItem>; base: Rect | null }
@@ -165,6 +166,11 @@ export class Editor {
   /** Умное рисование: нарисованное от руки превращается в фигуру или линию. */
   smart = false;
   readonly selection = new Set<string>();
+  /**
+   * Только просмотр (опубликованная доска): любая кнопка мыши двигает доску, щелчок открывает заметку, фото,
+   * ссылку или приближает рамку; выделения, правки и меню нет.
+   */
+  readOnly = false;
   /** Изменилось что-то, что показывает интерфейс вокруг доски. */
   onUi: (() => void) | null = null;
   /** Короткое сообщение для пользователя. */
@@ -323,7 +329,7 @@ export class Editor {
     });
     on(h, 'drop', (e) => {
       const files = [...(e.dataTransfer?.files ?? [])];
-      if (!files.length) return;
+      if (!files.length || this.readOnly) return;
       e.preventDefault();
       const p = this.readPointer(e);
       this.onFiles?.(files, { x: p.wx, y: p.wy });
@@ -375,6 +381,11 @@ export class Editor {
     }
     e.preventDefault();
 
+    if (this.readOnly) {
+      this.startPan(p, false);
+      if (e.button === 0 && this.gesture?.kind === 'pan') this.gesture.open = true;
+      return;
+    }
     if (e.button === 1 || e.button === 2 || this.spaceDown) {
       this.startPan(p, false);
       // Правая кнопка без движения — меню, с движением — двигаем доску.
@@ -485,7 +496,7 @@ export class Editor {
   }
 
   private startPan(p: PointerState, clearOnClick: boolean): void {
-    this.gesture = { kind: 'pan', lastX: p.sx, lastY: p.sy, moved: false, clearOnClick, downX: p.sx, downY: p.sy, menu: false, clientX: 0, clientY: 0 };
+    this.gesture = { kind: 'pan', lastX: p.sx, lastY: p.sy, moved: false, clearOnClick, downX: p.sx, downY: p.sy, menu: false, clientX: 0, clientY: 0, open: false };
     this.host.style.cursor = 'grabbing';
   }
 
@@ -604,7 +615,7 @@ export class Editor {
     this.gesture = null;
     this.guides = [];
     this.snapHits = [];
-    this.host.style.cursor = this.tool === 'select' ? (this.spaceDown ? 'grab' : '') : 'crosshair';
+    this.host.style.cursor = this.idleCursor();
     if (!g) return;
     if (g.kind === 'draw') g.predicted = [];
     const p = this.pointer ?? this.readPointer(e);
@@ -612,6 +623,10 @@ export class Editor {
 
     switch (g.kind) {
       case 'pan':
+        if (!g.moved && g.open) {
+          const hit = this.hitTest(w);
+          if (hit) this.activate(hit);
+        }
         if (!g.moved && g.clearOnClick && !p.shift) this.select([]);
         if (!g.moved && g.menu) {
           // Меню по объекту: если щёлкнули не по выделенному — выделяем его, как в Miro.
@@ -662,8 +677,25 @@ export class Editor {
     this.changed();
   }
 
+  /** Открыть объект: заметку — в панели, фото — в просмотре, ссылку — видео на доске или страницу, рамку — приблизить. */
+  private activate(id: string): void {
+    const item = this.store.get(id);
+    if (item?.kind === 'image') this.onOpenImage?.(id);
+    else if (item?.kind === 'doc') this.onOpenDoc?.(this.view.paths.toVault(item.file), 'read');
+    else if (item?.kind === 'link') {
+      if (embedUrl(item.url)) this.onPlayEmbed?.(id);
+      else window.open(item.url, '_blank', 'noopener');
+    } else if (item?.kind === 'frame') this.view.fitRect(item, 60, 4);
+  }
+
+  /** Курсор, когда ничего не происходит. */
+  private idleCursor(): string {
+    if (this.readOnly || this.spaceDown) return 'grab';
+    return this.tool === 'select' ? '' : 'crosshair';
+  }
+
   private onDoubleClick(e: MouseEvent): void {
-    if (this.tool !== 'select' || (e.target as HTMLElement).closest('.text-edit')) return;
+    if (this.readOnly || this.tool !== 'select' || (e.target as HTMLElement).closest('.text-edit')) return;
     const p = this.readPointer(e);
     const w = { x: p.wx, y: p.wy };
     const hit = this.hitTest(w);
@@ -879,6 +911,18 @@ export class Editor {
   }
 
   private updateHover(p: PointerState): void {
+    if (this.readOnly) {
+      // На сайте подсвечивается только то, что открывается щелчком.
+      const hit = this.spaceDown ? null : this.hitTest({ x: p.wx, y: p.wy });
+      const kind = hit ? this.store.get(hit)?.kind : undefined;
+      const hover = kind === 'image' || kind === 'doc' || kind === 'link' || kind === 'frame' ? hit : null;
+      this.host.style.cursor = hover ? 'pointer' : 'grab';
+      if (hover !== this.hover) {
+        this.hover = hover;
+        this.view.invalidateOverlay();
+      }
+      return;
+    }
     let cursor = this.tool === 'select' ? (this.spaceDown ? 'grab' : '') : 'crosshair';
     let hover: string | null = null;
     if (this.tool === 'select' && !this.spaceDown) {
@@ -2234,7 +2278,7 @@ export class Editor {
   }
 
   private onCopy(e: ClipboardEvent, cut: boolean): void {
-    if (this.isTyping(e.target) || !this.selection.size) return;
+    if (this.readOnly || this.isTyping(e.target) || !this.selection.size) return;
     const ids = new Set(this.selection);
     // Вместе с рамкой копируется её содержимое.
     for (const id of [...ids]) {
@@ -2249,7 +2293,7 @@ export class Editor {
   }
 
   private onPaste(e: ClipboardEvent): void {
-    if (this.isTyping(e.target)) return;
+    if (this.readOnly || this.isTyping(e.target)) return;
     const data = e.clipboardData;
     if (!data) return;
     const files = [...data.files];
@@ -2343,6 +2387,15 @@ export class Editor {
     if (this.isTyping(e.target)) return;
     const ctrl = e.ctrlKey || e.metaKey;
     const code = e.code;
+    // На сайте — только то, что не меняет доску: двигать, приближать, искать.
+    // Ctrl+A глушим: иначе браузер выделит весь текст страницы.
+    if (this.readOnly && ctrl && code === 'KeyA') e.preventDefault();
+    if (
+      this.readOnly &&
+      !(code === 'Space' || code === 'Escape' ||
+        (ctrl && ['KeyF', 'Equal', 'NumpadAdd', 'Minus', 'NumpadSubtract'].includes(code)) ||
+        (e.shiftKey && !ctrl && (code === 'Digit1' || code === 'Digit0')))
+    ) return;
     const handled = (): void => {
       e.preventDefault();
       this.perf.noteInput(e.timeStamp);
@@ -2462,7 +2515,7 @@ export class Editor {
   private onKeyUp(e: KeyboardEvent): void {
     if (e.code === 'Space') {
       this.spaceDown = false;
-      if (!this.gesture) this.host.style.cursor = this.tool === 'select' ? '' : 'crosshair';
+      if (!this.gesture) this.host.style.cursor = this.idleCursor();
     }
   }
 
