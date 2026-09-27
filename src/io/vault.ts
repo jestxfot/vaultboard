@@ -70,6 +70,13 @@ export interface SiteInfo {
   remote: string | null;
 }
 
+export interface SiteSuggestion {
+  path: string;
+  kind: 'site' | 'repo' | 'new';
+  remote: string | null;
+  boards: number;
+}
+
 export interface PublishResult {
   title: string;
   files: number;
@@ -232,6 +239,12 @@ const serverVault = {
   publishPlan: (board: string, dir = '') =>
     request<{ plan: PublishPlan; site: SiteInfo }>(`/api/publish/plan?board=${encodeURIComponent(board)}&dir=${encodeURIComponent(dir)}`),
 
+  /** Готовые папки для сайта и есть ли gh (тогда репозиторий создаётся кнопкой). */
+  publishSuggest: () => request<{ suggestions: SiteSuggestion[]; gh: boolean }>('/api/publish/suggest'),
+
+  createGithubRepo: (dir: string, name: string, visibility: 'public' | 'private') =>
+    request<{ remote: string }>('/api/publish/github', { method: 'POST', body: JSON.stringify({ dir, name, visibility }) }),
+
   siteInfo: (dir: string, board: string) => request<SiteInfo>(`/api/publish/site?dir=${encodeURIComponent(dir)}&board=${encodeURIComponent(board)}`),
 
   publish: (board: string, dir: string, push: boolean) =>
@@ -380,6 +393,8 @@ const siteVault: typeof serverVault = {
   siteInfo: async () => readOnly(),
   publish: async () => readOnly(),
   unpublish: async () => readOnly(),
+  publishSuggest: async () => readOnly(),
+  createGithubRepo: async () => readOnly(),
   guestMe: async () => ({ guest: false as const, owner: "" }),
   guestLogin: async () => readOnly(),
   invites: async () => readOnly(),

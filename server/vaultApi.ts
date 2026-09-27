@@ -10,7 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts';
-import { gitPush, gitRemote, isGitRepo, planBoard, publishBoard, readManifest, unpublishBoard } from './publish.ts';
+import { createGithubRepo, ghReady, gitPush, gitRemote, isGitRepo, planBoard, publishBoard, readManifest, suggestSiteDirs, unpublishBoard } from './publish.ts';
 import { cookieOf, foreignOrigin, INVITE_COOKIE, type Invite, InviteStore, isRemote, type GuestRole } from './access.ts';
 import { LiveHub, type Role } from './live.ts';
 import { Tunnel } from './tunnel.ts';
@@ -1053,6 +1053,24 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       const { doc: _doc, ...plan } = await planBoard(absRoot, board);
       const dir = url.searchParams.get('dir') || (await readSettings()).siteDir || '';
       return sendJson(res, 200, { plan, site: await siteInfo(dir, board) });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/publish/suggest') {
+      // Готовые папки для сайта — чтобы не искать её вручную.
+      const home = os.homedir();
+      const docs = path.join(home, 'Documents');
+      const roots = [home, docs, path.join(docs, 'GitHub'), path.join(home, 'Desktop'), path.dirname(absRoot), path.parse(absRoot).root];
+      const s = await readSettings();
+      return sendJson(res, 200, { suggestions: await suggestSiteDirs(roots, path.join(docs, 'vaultboard-сайт'), s.siteDir ?? null), gh: ghReady() });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/publish/github') {
+      const body = JSON.parse(await readBody(req)) as { dir: string; name: string; visibility?: 'public' | 'private' };
+      if (!body.dir?.trim()) return sendJson(res, 400, { error: 'Выбери папку сайта' });
+      const r = await createGithubRepo(body.dir, body.name ?? 'vaultboard-site', body.visibility === 'private' ? 'private' : 'public');
+      await writeSettings({ ...(await readSettings()), siteDir: path.resolve(body.dir) });
+      logLine(`[публикация] создан репозиторий сайта ${r.remote}`);
+      return sendJson(res, 200, r);
     }
 
     if (req.method === 'GET' && url.pathname === '/publish/site') {

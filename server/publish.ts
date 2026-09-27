@@ -187,6 +187,94 @@ async function checkSiteDir(siteDir: string): Promise<SiteManifest | null> {
   return null;
 }
 
+export interface SiteSuggestion {
+  path: string;
+  /** site — уже сайт vaultboard; repo — пустой клон репозитория; new — предлагаем создать. */
+  kind: 'site' | 'repo' | 'new';
+  remote: string | null;
+  boards: number;
+}
+
+/** Адрес origin из .git/config без запуска git (быстро, можно для десятков папок). */
+async function originOf(dir: string): Promise<string | null> {
+  const text = await fs.readFile(path.join(dir, '.git', 'config'), 'utf8').catch(() => '');
+  const m = /\[remote "origin"\][^[]*?url\s*=\s*(\S+)/.exec(text);
+  return m ? m[1] : null;
+}
+
+/**
+ * Готовые папки для сайта: уже опубликованные сайты vaultboard и пустые клоны репозиториев — в привычных местах
+ * (папка пользователя, Документы, Документы/GitHub, рабочий стол, рядом с базой). Плюс новая «Документы/vaultboard-сайт».
+ */
+export async function suggestSiteDirs(roots: string[], newDir: string, current: string | null): Promise<SiteSuggestion[]> {
+  const seen = new Set<string>();
+  const out: SiteSuggestion[] = [];
+  const consider = async (dir: string) => {
+    const key = path.resolve(dir).toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const manifest = await readManifest(dir);
+    if (manifest) {
+      out.push({ path: path.resolve(dir), kind: 'site', remote: await originOf(dir), boards: manifest.boards.length });
+      return;
+    }
+    const names = await fs.readdir(dir).catch(() => null);
+    if (!names?.includes('.git')) return;
+    if (names.some((n) => !FOREIGN_OK.has(n))) return;
+    out.push({ path: path.resolve(dir), kind: 'repo', remote: await originOf(dir), boards: 0 });
+  };
+  if (current) await consider(current);
+  for (const root of roots) {
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    for (const e of entries.slice(0, 300)) {
+      if (e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('$')) await consider(path.join(root, e.name));
+    }
+  }
+  if (!out.some((s) => path.resolve(s.path).toLowerCase() === path.resolve(newDir).toLowerCase())) {
+    out.push({ path: path.resolve(newDir), kind: 'new', remote: null, boards: 0 });
+  }
+  const rank = { site: 0, repo: 1, new: 2 };
+  return out.sort((a, b) => rank[a.kind] - rank[b.kind]);
+}
+
+/** Программа gh (GitHub CLI) установлена и в неё выполнен вход — тогда репозиторий сайта можно создать кнопкой. */
+export function ghReady(): boolean {
+  const gh = process.env.VAULTBOARD_GH || 'gh';
+  return spawnSync(gh, ['auth', 'status'], { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' && gh.endsWith('.cmd') }).status === 0;
+}
+
+/**
+ * Создать на GitHub репозиторий для сайта и связать с ним папку: git init и `gh repo create --source`.
+ * Файлы уйдут туда при первой публикации с галочкой «Сразу отправить».
+ */
+export async function createGithubRepo(siteDir: string, name: string, visibility: 'public' | 'private'): Promise<{ remote: string }> {
+  const dir = path.resolve(siteDir);
+  await checkSiteDir(dir);
+  const gh = process.env.VAULTBOARD_GH || 'gh';
+  if (!isGitRepo(dir)) {
+    const init = await git(dir, ['init', '-q', '-b', 'main']);
+    if (init.status !== 0) throw new Error(`git init: ${init.stderr || init.stdout}`);
+  }
+  if (gitRemote(dir)) throw new Error(`У папки уже есть репозиторий: ${gitRemote(dir)}`);
+  const clean = name.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'vaultboard-site';
+  const r = await new Promise<{ status: number | null; out: string }>((resolve) => {
+    const p = spawn(gh, ['repo', 'create', clean, `--${visibility}`, '--source', dir, '--remote', 'origin', '--description', 'Доски vaultboard'], {
+      cwd: dir,
+      windowsHide: true,
+      shell: process.platform === 'win32' && gh.endsWith('.cmd'),
+    });
+    let out = '';
+    p.stdout.on('data', (d: Buffer) => (out += d.toString('utf8')));
+    p.stderr.on('data', (d: Buffer) => (out += d.toString('utf8')));
+    p.on('error', (err) => resolve({ status: -1, out: err.message }));
+    p.on('close', (status) => resolve({ status, out }));
+  });
+  if (r.status !== 0) throw new Error(`GitHub не создал репозиторий: ${r.out.trim()}`);
+  const remote = gitRemote(dir);
+  if (!remote) throw new Error('Репозиторий создан, но папка с ним не связалась');
+  return { remote };
+}
+
 export function isGitRepo(siteDir: string): boolean {
   return spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: siteDir, encoding: 'utf8', windowsHide: true }).stdout?.trim() === 'true';
 }

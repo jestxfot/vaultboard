@@ -1,7 +1,7 @@
 // Публикация доски на сайт: папка сайта, список того, что уйдёт (особо — файлы из других папок базы),
 // и кнопка. Сайт — снимок доски: правки на диске попадут на него при следующей публикации.
 import { createMemo, createSignal, For, onMount, Show } from 'solid-js';
-import { type PublishPlan, type PublishResult, type SiteInfo, vault } from '../io/vault.ts';
+import { type PublishPlan, type PublishResult, type SiteInfo, type SiteSuggestion, vault } from '../io/vault.ts';
 import { FolderPicker } from './FolderPicker.tsx';
 
 const KIND_NAMES: Record<PublishPlan['files'][number]['kind'], string> = {
@@ -28,18 +28,52 @@ export function PublishDialog(props: { board: string; onClose: () => void; onDon
   const [result, setResult] = createSignal<PublishResult | null>(null);
   const [showOutside, setShowOutside] = createSignal(true);
   const [howto, setHowto] = createSignal(false);
+  /** Готовые папки для сайта (найденные сайты, пустые клоны репозиториев, новая папка). */
+  const [suggestions, setSuggestions] = createSignal<SiteSuggestion[]>([]);
+  const [choosing, setChoosing] = createSignal(false);
+  const [gh, setGh] = createSignal(false);
+  const [repoName, setRepoName] = createSignal('vaultboard-site');
+  const [repoPrivate, setRepoPrivate] = createSignal(true);
 
   onMount(async () => {
     try {
-      const r = await vault.publishPlan(props.board);
+      const [r, sug] = await Promise.all([vault.publishPlan(props.board), vault.publishSuggest().catch(() => ({ suggestions: [], gh: false }))]);
       setPlan(r.plan);
-      setSite(r.site);
-      setDir(r.site.dir);
-      setHowto(!r.site.dir);
+      setSuggestions(sug.suggestions);
+      setGh(sug.gh);
+      if (r.site.dir) {
+        setSite(r.site);
+        setDir(r.site.dir);
+      } else if (sug.suggestions.length) {
+        // Папка ещё не выбрана — сразу берём лучшую из готовых: остаётся только нажать «Опубликовать».
+        await pick(sug.suggestions[0].path);
+        setChoosing(sug.suggestions.length > 1);
+      }
     } catch (err) {
       setError((err as Error).message);
     }
   });
+
+  const suggestionText = (s: SiteSuggestion) =>
+    s.kind === 'site'
+      ? `Сайт vaultboard · досок ${s.boards}${s.remote ? ` · ${s.remote.replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '')}` : ''}`
+      : s.kind === 'repo'
+        ? `Пустой репозиторий${s.remote ? ` · ${s.remote.replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '')}` : ''}`
+        : 'Новая папка — появится при публикации';
+
+  const makeRepo = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await vault.createGithubRepo(dir(), repoName(), repoPrivate() ? 'private' : 'public');
+      setSite(await vault.siteInfo(dir(), props.board));
+      setPush(true);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const pick = async (p: string) => {
     setPicking(false);
@@ -113,10 +147,40 @@ export function PublishDialog(props: { board: string; onClose: () => void; onDon
 
           <section class="setup-step">
             <div class="step-head small">Папка сайта</div>
-            <div class="settings-row">
-              <span class="settings-path" title={dir()}>{dir() || 'не выбрана'}</span>
-              <button class="soft-btn" onClick={() => setPicking(true)}>{dir() ? 'Изменить…' : 'Выбрать…'}</button>
-            </div>
+            <Show
+              when={choosing() || !dir()}
+              fallback={
+                <div class="settings-row">
+                  <span class="settings-path" title={dir()}>{dir()}</span>
+                  <button class="soft-btn" onClick={() => setChoosing(true)}>Изменить…</button>
+                </div>
+              }
+            >
+              <div class="site-options">
+                <For each={suggestions()}>
+                  {(s) => (
+                    <button
+                      class="site-option"
+                      classList={{ active: dir().toLowerCase() === s.path.toLowerCase() }}
+                      onClick={() => {
+                        void pick(s.path);
+                        setChoosing(false);
+                      }}
+                    >
+                      <span class="so-kind">{s.kind === 'site' ? '🌐' : s.kind === 'repo' ? '📦' : '✨'}</span>
+                      <span class="so-text">
+                        <b>{s.path}</b>
+                        <small>{suggestionText(s)}</small>
+                      </span>
+                    </button>
+                  )}
+                </For>
+                <button class="site-option" onClick={() => setPicking(true)}>
+                  <span class="so-kind">📁</span>
+                  <span class="so-text"><b>Другая папка…</b><small>выбрать самому</small></span>
+                </button>
+              </div>
+            </Show>
             <Show when={site() && dir()}>
               <div class="step-note">
                 <Show when={site()!.boards.length} fallback="Сайта здесь ещё нет — он появится при публикации.">
@@ -124,15 +188,21 @@ export function PublishDialog(props: { board: string; onClose: () => void; onDon
                   <Show when={site()!.published}> · эта опубликована {new Date(site()!.published!).toLocaleString('ru-RU')}</Show>
                 </Show>
                 <br />
-                <Show
-                  when={site()!.git}
-                  fallback={<>Папка не в git — выложить её на хостинг нужно будет вручную (или сделай её клоном репозитория, см. ниже).</>}
-                >
-                  <Show when={site()!.remote} fallback="git есть, но не настроен адрес отправки (origin).">
-                    git → {site()!.remote}
-                  </Show>
+                <Show when={site()!.remote} fallback={gh() ? 'Репозитория у папки пока нет — его можно создать здесь же:' : 'Папка не связана с GitHub — выложить её на хостинг нужно будет вручную (или сделай её клоном репозитория, см. ниже).'}>
+                  git → {site()!.remote}
                 </Show>
               </div>
+              <Show when={!site()!.remote && gh()}>
+                <div class="settings-row">
+                  <input class="setup-input" value={repoName()} onInput={(e) => setRepoName(e.currentTarget.value)} title="Имя репозитория на GitHub" />
+                  <select class="ctx-select" value={repoPrivate() ? 'private' : 'public'} onChange={(e) => setRepoPrivate(e.currentTarget.value === 'private')}>
+                    <option value="private">закрытый</option>
+                    <option value="public">открытый</option>
+                  </select>
+                  <button class="soft-btn" disabled={busy() || !repoName().trim()} onClick={() => void makeRepo()}>Создать на GitHub</button>
+                </div>
+                <div class="step-note">Через программу gh, в которую ты уже вошёл. Сайт на Vercel будет открыт всем в любом случае; закрытый репозиторий прячет только историю файлов.</div>
+              </Show>
             </Show>
           </section>
 

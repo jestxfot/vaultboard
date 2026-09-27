@@ -699,3 +699,11 @@ kbd { font: 500 11.5px/1.4 "Segoe UI", system-ui, sans-serif; background: var(--
 .guest-gate .dialog { text-align: center; }
 .invite .step-note.bad { color: var(--bad); }
 .topbar-publish, .invite .setup-start { white-space: nowrap; }
+.site-options { display: flex; flex-direction: column; gap: 6px; }
+.site-option { display: flex; align-items: center; gap: 10px; text-align: left; font: inherit; border: 1.5px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 11px; padding: 8px 12px; cursor: pointer; }
+.site-option:hover { border-color: var(--accent); }
+.site-option.active { border-color: var(--accent); background: var(--accent-soft); }
+.site-option .so-kind { font-size: 18px; flex: none; }
+.site-option .so-text { display: flex; flex-direction: column; min-width: 0; }
+.site-option .so-text b { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.site-option .so-text small { color: var(--muted); font-size: 12px; }
