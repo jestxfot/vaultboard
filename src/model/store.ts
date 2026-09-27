@@ -109,7 +109,8 @@ function mergeOps(ops: Op[]): Op[] {
   return out.filter((o) => o.t !== 'thread' || o.before || o.after);
 }
 
-export type StoreListener = (ops: Op[]) => void;
+/** `remote` — правки пришли от другого участника доски (их не надо отправлять обратно и сохранять заново). */
+export type StoreListener = (ops: Op[], remote?: boolean) => void;
 
 export class BoardStore {
   readonly doc: BoardDoc;
@@ -340,29 +341,26 @@ export class BoardStore {
     const g = this.gesture;
     this.gesture = null;
     if (!g || !g.ops.length) return;
-    const inverse = g.ops.map(invert).reverse();
-    for (const op of inverse) this.applyOp(op);
-    this.emit(inverse);
+    this.emit(this.applyAll(g.ops.map(invert).reverse()));
   }
 
   undo(): void {
     if (this.gesture) this.endGesture();
     const tx = this.undoStack.pop();
     if (!tx) return;
-    const inverse = tx.ops.map(invert).reverse();
-    for (const op of inverse) this.applyOp(op);
+    const done = this.applyAll(tx.ops.map(invert).reverse());
     this.redoStack.push(tx);
     this.notifyHistory({ kind: 'undo' });
-    this.emit(inverse);
+    this.emit(done);
   }
 
   redo(): void {
     const tx = this.redoStack.pop();
     if (!tx) return;
-    for (const op of tx.ops) this.applyOp(op);
+    const done = this.applyAll(tx.ops);
     this.undoStack.push(tx);
     this.notifyHistory({ kind: 'redo' });
-    this.emit(tx.ops);
+    this.emit(done);
   }
 
   // ---------- внутреннее ----------
@@ -388,42 +386,125 @@ export class BoardStore {
 
   private run(op: Op): void {
     this.write(() => {
-      this.applyOp(op);
-      this.sink!.push(op);
+      const done = this.applyOp(op);
+      if (done) this.sink!.push(done);
     });
   }
 
-  private applyOp(op: Op): void {
+  /**
+   * Применить операцию. Объект ищется по id, а номер в операции — только подсказка места:
+   * при совместной правке чужие вставки и удаления сдвигают номера, и отмена по номеру задела бы не тот объект.
+   * Поэтому операция над исчезнувшим объектом просто пропускается, а вставка уже существующего — заменяет его
+   * («кто последний тронул объект, того и версия»).
+   */
+  private applyOp(op: Op): Op | null {
     const items = this.doc.items;
     switch (op.t) {
-      case 'insert':
-        items.splice(op.index, 0, op.item);
+      case 'insert': {
+        const old = this.byId.get(op.item.id);
+        if (old) return this.applyOp({ t: 'replace', index: this.indexOf(old.id), before: old, after: op.item });
+        const at = Math.min(op.index, items.length);
+        items.splice(at, 0, op.item);
         this.byId.set(op.item.id, op.item);
         this.link(op.item);
         this.positionDirty = true;
-        break;
-      case 'delete':
-        items.splice(op.index, 1);
+        return at === op.index ? op : { ...op, index: at };
+      }
+      case 'delete': {
+        const cur = this.byId.get(op.item.id);
+        if (!cur) return null;
+        const at = items[op.index]?.id === op.item.id ? op.index : this.indexOf(op.item.id);
+        items.splice(at, 1);
         this.byId.delete(op.item.id);
-        this.unlink(op.item);
+        this.unlink(cur);
         this.positionDirty = true;
-        break;
-      case 'prop':
+        return { t: 'delete', index: at, item: cur };
+      }
+      case 'prop': {
+        const before = this.doc[op.key];
         if (op.after === undefined) delete this.doc[op.key];
         else (this.doc as Record<string, unknown>)[op.key] = op.after;
-        break;
-      case 'thread':
-        if (!op.before) this.doc.comments.splice(op.index, 0, op.after!);
-        else if (!op.after) this.doc.comments.splice(op.index, 1);
-        else this.doc.comments[op.index] = op.after;
-        break;
-      case 'replace':
-        items[op.index] = op.after;
+        return { ...op, before };
+      }
+      case 'thread': {
+        const id = (op.after ?? op.before)!.id;
+        const at = this.doc.comments[op.index]?.id === id ? op.index : this.doc.comments.findIndex((t) => t.id === id);
+        if (!op.after) {
+          if (at < 0) return null;
+          const before = this.doc.comments[at];
+          this.doc.comments.splice(at, 1);
+          return { t: 'thread', index: at, before, after: null };
+        }
+        if (at >= 0) {
+          const before = this.doc.comments[at];
+          this.doc.comments[at] = op.after;
+          return { t: 'thread', index: at, before, after: op.after };
+        }
+        const to = Math.min(op.index, this.doc.comments.length);
+        this.doc.comments.splice(to, 0, op.after);
+        return { t: 'thread', index: to, before: null, after: op.after };
+      }
+      case 'replace': {
+        const cur = this.byId.get(op.after.id);
+        if (!cur) return null;
+        const at = items[op.index]?.id === op.after.id ? op.index : this.indexOf(op.after.id);
+        items[at] = op.after;
         this.byId.set(op.after.id, op.after);
-        if (isLine(op.before)) this.unlink(op.before);
+        if (isLine(cur)) this.unlink(cur);
         this.link(op.after);
-        break;
+        return { t: 'replace', index: at, before: cur, after: op.after };
+      }
     }
+  }
+
+  /** Применить список операций; вернуть то, что на самом деле сделано (для вида доски и подписчиков). */
+  private applyAll(ops: Op[]): Op[] {
+    const done: Op[] = [];
+    for (const op of ops) {
+      const eff = this.applyOp(op);
+      if (eff) done.push(eff);
+    }
+    return done;
+  }
+
+  // ---------- совместная правка ----------
+
+  /**
+   * Чужие правки (другой участник доски): применяются сразу, в историю отмены не попадают,
+   * подписчики получают их с пометкой `remote` — такие правки не отправляются обратно на сервер.
+   * Идущий жест (перетаскивание) не прерывается: чужая правка того же объекта перезапишется нашей, когда отпустим.
+   */
+  applyRemote(ops: Op[]): void {
+    const done = this.applyAll(ops);
+    if (!done.length) return;
+    for (const fn of this.listeners) fn(done, true);
+  }
+
+  /** Заменить документ целиком (сервер прислал свежую версию доски) — история отмены сбрасывается. */
+  resetTo(doc: { items: Item[]; comments: CommentThread[] } & Record<string, unknown>): Op[] {
+    const ops: Op[] = [];
+    const next = new Map(doc.items.map((i) => [i.id, i]));
+    for (const item of [...this.doc.items].reverse()) if (!next.has(item.id)) ops.push({ t: 'delete', index: this.indexOf(item.id), item });
+    doc.items.forEach((item, index) => {
+      const cur = this.byId.get(item.id);
+      if (!cur) ops.push({ t: 'insert', index, item });
+      else if (JSON.stringify(cur) !== JSON.stringify(item)) ops.push({ t: 'replace', index, before: cur, after: item });
+    });
+    for (const key of ['styles', 'background', 'layers'] as const) {
+      if (JSON.stringify(this.doc[key]) !== JSON.stringify(doc[key])) ops.push({ t: 'prop', key, before: this.doc[key], after: doc[key] });
+    }
+    const threads = new Map(doc.comments.map((t) => [t.id, t]));
+    this.doc.comments.forEach((t, index) => {
+      if (!threads.has(t.id)) ops.push({ t: 'thread', index, before: t, after: null });
+    });
+    doc.comments.forEach((t, index) => {
+      const cur = this.doc.comments.find((c) => c.id === t.id) ?? null;
+      if (JSON.stringify(cur) !== JSON.stringify(t)) ops.push({ t: 'thread', index, before: cur, after: t });
+    });
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+    this.applyRemote(ops);
+    return ops;
   }
 
   private link(item: Item): void {

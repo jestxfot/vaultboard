@@ -677,3 +677,25 @@ kbd { font: 500 11.5px/1.4 "Segoe UI", system-ui, sans-serif; background: var(--
 /* Редактор заметок (CodeMirror) — курсор и выделение под тему. */
 .doc-edit .cm-cursor, .doc-edit .cm-dropCursor { border-left-color: var(--ink); }
 :root[data-theme="dark"] .doc-edit .cm-selectionBackground, :root[data-theme="dark"] .doc-edit .cm-focused .cm-selectionBackground { background: #3a4570 !important; }
+
+/* ---------- совместная правка ---------- */
+.presence-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+.presence-cursor { position: absolute; left: 0; top: 0; will-change: transform; transition: transform 80ms linear; }
+.presence-cursor span { position: absolute; left: 14px; top: 16px; color: #fff; font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 8px; white-space: nowrap; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+.peers { display: inline-flex; align-items: center; pointer-events: auto; margin-left: 4px; }
+.peer-dot { width: 22px; height: 22px; border-radius: 50%; color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; border: 2px solid var(--panel); margin-left: -5px; }
+.dialog.invite { width: min(620px, 94vw); }
+.invite-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.invite-row:last-child { border-bottom: 0; }
+.invite-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.invite-label small { color: var(--muted); }
+.invite-link { width: 100%; font: inherit; font-size: 12.5px; padding: 7px 10px; border: 1.5px solid var(--line); border-radius: 9px; background: var(--soft); color: var(--ink); }
+.invite-status { display: flex; align-items: center; gap: 8px; }
+.status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+.status-dot.on { background: #27ae60; box-shadow: 0 0 0 3px rgba(39,174,96,.2); }
+.status-dot.bad { background: var(--bad); }
+.invite select, .invite input.setup-input { background: var(--panel); color: var(--ink); }
+.guest-gate { position: absolute; inset: 0; display: grid; place-items: center; z-index: 20; background: var(--bg); }
+.guest-gate .dialog { text-align: center; }
+.invite .step-note.bad { color: var(--bad); }
+.topbar-publish, .invite .setup-start { white-space: nowrap; }

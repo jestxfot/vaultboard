@@ -171,6 +171,8 @@ export class Editor {
    * ссылку или приближает рамку; выделения, правки и меню нет.
    */
   readOnly = false;
+  /** При `readOnly` всё же можно оставлять комментарии (гость с ролью «комментирует»). */
+  canComment = false;
   /** Изменилось что-то, что показывает интерфейс вокруг доски. */
   onUi: (() => void) | null = null;
   /** Короткое сообщение для пользователя. */
@@ -382,6 +384,11 @@ export class Editor {
     e.preventDefault();
 
     if (this.readOnly) {
+      if (this.canComment && this.tool === 'comment' && e.button === 0) {
+        this.setTool('select');
+        this.onComment?.({ x: p.wx, y: p.wy });
+        return;
+      }
       this.startPan(p, false);
       if (e.button === 0 && this.gesture?.kind === 'pan') this.gesture.open = true;
       return;
@@ -2400,7 +2407,7 @@ export class Editor {
     if (this.readOnly && ctrl && code === 'KeyA') e.preventDefault();
     if (
       this.readOnly &&
-      !(code === 'Space' || code === 'Escape' ||
+      !(code === 'Space' || code === 'Escape' || (code === 'KeyC' && !ctrl && (this.canComment || e.shiftKey)) ||
         (ctrl && ['KeyF', 'Equal', 'NumpadAdd', 'Minus', 'NumpadSubtract'].includes(code)) ||
         (e.shiftKey && !ctrl && (code === 'Digit1' || code === 'Digit0')))
     ) return;

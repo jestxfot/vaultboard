@@ -9,7 +9,7 @@
 import { createReadStream, promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { toAbsolute, walkVault } from './vaultFs.ts';
 import { parseBoard, serializeBoard } from '../src/format/board.ts';
@@ -84,9 +84,10 @@ export function publicBoard(doc: BoardDoc): { doc: BoardDoc; hiddenItems: number
 }
 
 /** Какие файлы нужны доске: фото, файлы, заметки, картинки ссылок и то, что вставлено в тексты через ![[…]]. */
-export async function planBoard(root: string, board: string): Promise<PublishPlan & { doc: BoardDoc }> {
+export async function planBoard(root: string, board: string, opts: { all?: boolean } = {}): Promise<PublishPlan & { doc: BoardDoc }> {
   const original = parseBoard(await fs.readFile(toAbsolute(root, board), 'utf8'));
-  const { doc, hiddenItems } = publicBoard(original);
+  // `all` — все объекты, со скрытыми слоями (так гостю нужны файлы общей доски); без него — как для сайта.
+  const { doc, hiddenItems } = opts.all ? { doc: original, hiddenItems: 0 } : publicBoard(original);
   const folder = boardFolderOf(board);
   const paths = new BoardPaths(folder);
   const wanted = new Map<string, PlanKind>([[board, 'board']]);
@@ -195,21 +196,33 @@ export function gitRemote(siteDir: string): string | null {
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
+/** Запустить git и дождаться (не блокируя сервер: push может идти секунды). */
+function git(cwd: string, args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const p = spawn('git', args, { cwd, windowsHide: true });
+    let stdout = '', stderr = '';
+    p.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
+    p.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
+    p.on('error', (err) => resolve({ status: -1, stdout, stderr: err.message }));
+    p.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
 /** Закоммитить и отправить сайт. Возвращает, что сказал git. */
-function gitPush(siteDir: string, message: string): { ok: boolean; output: string } {
-  const run = (args: string[]) => spawnSync('git', args, { cwd: siteDir, encoding: 'utf8', windowsHide: true });
+export async function gitPush(siteDir: string, message: string): Promise<{ ok: boolean; output: string }> {
+  const run = (args: string[]) => git(siteDir, args);
   const log: string[] = [];
-  const add = run(['add', '-A']);
+  const add = await run(['add', '-A']);
   if (add.status !== 0) return { ok: false, output: add.stderr || add.stdout };
-  const status = run(['status', '--porcelain']);
+  const status = await run(['status', '--porcelain']);
   if (status.stdout.trim()) {
-    const commit = run(['commit', '-q', '-m', message]);
+    const commit = await run(['commit', '-q', '-m', message]);
     log.push((commit.stdout + commit.stderr).trim());
     if (commit.status !== 0) return { ok: false, output: log.join('\n') };
   } else {
     log.push('Изменений нет — коммит не нужен');
   }
-  const push = run(['push', '-q', '-u', 'origin', 'HEAD']);
+  const push = await run(['push', '-q', '-u', 'origin', 'HEAD']);
   log.push((push.stdout + push.stderr).trim());
   return { ok: push.status === 0, output: log.filter(Boolean).join('\n') };
 }
@@ -356,8 +369,8 @@ export async function publishBoard(o: PublishOptions): Promise<PublishResult> {
   const next: SiteManifest = { format: SITE_FORMAT, updated: new Date().toISOString(), boards, files };
   await writeManifest(siteDir, next);
   const removed = await sweep(siteDir, next);
-  const git = o.push ? gitPush(siteDir, `Публикация: ${plan.title}`) : null;
-  return { title: plan.title, files: plan.files.length, copied, copiedBytes, removed, missing: plan.missing, git };
+  const pushed = o.push ? await gitPush(siteDir, `Публикация: ${plan.title}`) : null;
+  return { title: plan.title, files: plan.files.length, copied, copiedBytes, removed, missing: plan.missing, git: pushed };
 }
 
 /** Снять доску с сайта: убрать из манифеста и удалить файлы, которые больше никому не нужны. */
@@ -371,5 +384,5 @@ export async function unpublishBoard(siteDir: string, board: string, push: boole
   await writeManifest(siteDir, next);
   const removed = await sweep(siteDir, next);
   const title = manifest.boards.find((b) => b.path === board)?.title ?? board;
-  return { removed, git: push ? gitPush(siteDir, `Снята с сайта: ${title}`) : null };
+  return { removed, git: push ? await gitPush(siteDir, `Снята с сайта: ${title}`) : null };
 }

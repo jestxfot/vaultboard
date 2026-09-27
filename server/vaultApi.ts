@@ -10,9 +10,13 @@ import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts';
-import { gitRemote, isGitRepo, planBoard, publishBoard, readManifest, unpublishBoard } from './publish.ts';
+import { gitPush, gitRemote, isGitRepo, planBoard, publishBoard, readManifest, unpublishBoard } from './publish.ts';
+import { cookieOf, foreignOrigin, INVITE_COOKIE, type Invite, InviteStore, isRemote, type GuestRole } from './access.ts';
+import { LiveHub, type Role } from './live.ts';
+import { Tunnel } from './tunnel.ts';
+import type { Op } from '../src/model/store.ts';
 import { BoardFormatError, parseBoard } from '../src/format/board.ts';
-import { boardFolderOf, historyPathOf } from '../src/model/paths.ts';
+import { boardFolderOf, boardTitleOf, historyPathOf } from '../src/model/paths.ts';
 import { unfurl } from './unfurl.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import { checkRelease, currentVersion, isGitCheckout, isNewer, type Release, settingsFile } from '../scripts/update.mjs';
@@ -69,6 +73,8 @@ interface Settings {
   autoUpdate?: boolean;
   /** Папка сайта, куда публикуются доски (её выкладывают на Vercel). */
   siteDir?: string;
+  /** Адрес опубликованного сайта (https://….vercel.app) — ссылки-приглашения ведут на него. */
+  siteUrl?: string;
 }
 
 /** Настройки читаются на каждый запрос (нужна папка базы) — держим в памяти, перечитываем после записи. */
@@ -237,6 +243,8 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     flushTimer = null;
     for (const p of pendingChanges) {
       changeLog.push({ seq: ++changeSeq, path: p });
+      // Общую доску поменяли снаружи (git, другая программа) — сервер перечитывает её и раздаёт участникам.
+      if (hub.isLive(p)) void hub.reloadFromDisk(p);
     }
     pendingChanges.clear();
     if (changeLog.length > 1000) changeLog.splice(0, changeLog.length - 1000);
@@ -343,7 +351,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       if (!canRestart) return;
       if ((await readSettings()).autoUpdate === false) return;
       if (Date.now() - lastActivity < quiet) return;
-      if (known && isNewer(known.tag, currentVersion(projectDir))) restartWithUpdate();
+      if (known && isNewer(known.tag, currentVersion(projectDir)) && !hub.busy) void hub.flush().finally(restartWithUpdate);
     }, every).unref();
   }
 
@@ -370,8 +378,283 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     };
   }
 
+
+  // ---------- совместная правка, приглашения, туннель ----------
+
+  const settingsDir = path.dirname(SETTINGS_FILE);
+  const invites = new InviteStore(settingsDir);
+  const hub = new LiveHub({
+    read: async (board) => {
+      const root = await currentRoot();
+      if (!root) throw new Error('Папка с досками не выбрана');
+      return fs.readFile(toAbsolute(root, board), 'utf8');
+    },
+    write: async (board, text) => {
+      const root = await currentRoot();
+      if (!root) throw new Error('Папка с досками не выбрана');
+      const abs = toAbsolute(root, board);
+      parseBoard(text);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      markOwn(abs);
+      const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`;
+      await fs.writeFile(tmp, text, 'utf8');
+      await fs.rename(tmp, abs);
+    },
+    log: logLine,
+  });
+  const tunnel = new Tunnel(path.join(settingsDir, 'bin'), (st) => {
+    if (st.kind === 'on') void announceLive(st.url);
+    else if (st.kind === 'off' || st.kind === 'error') void announceLive(null);
+  });
+  let announced: string | null | undefined;
+
+  /**
+   * Сказать опубликованному сайту, куда сейчас вести гостей: live.json в папке сайта (и git push, если сайт в git).
+   * Ссылка-приглашение ведёт на сайт с постоянным адресом, а сайт уже перенаправляет на туннель — его адрес
+   * меняется при каждом запуске.
+   */
+  async function announceLive(url: string | null): Promise<void> {
+    if (announced === url) return;
+    announced = url;
+    const dir = (await readSettings()).siteDir;
+    if (!dir || !(await readManifest(dir))) return;
+    await fs.writeFile(path.join(dir, 'live.json'), JSON.stringify({ url, since: new Date().toISOString() }, null, 1), 'utf8');
+    if (isGitRepo(dir) && gitRemote(dir)) {
+      const r = await gitPush(dir, url ? 'Автор в сети' : 'Автор не в сети');
+      logLine(`[туннель] адрес для гостей на сайте: ${url ?? 'нет'} — git ${r.ok ? 'отправлено' : `ошибка: ${r.output}`}`);
+    }
+  }
+
+  async function ownerName(): Promise<string> {
+    return (await readSettings()).author || os.userInfo().username || 'Автор';
+  }
+
+  /** Ссылка-приглашение: на сайт с постоянным адресом, а если его нет — прямо на туннель. */
+  async function linkFor(invite: Invite): Promise<string | null> {
+    const site = (await readSettings()).siteUrl;
+    const base = site || (tunnel.state.kind === 'on' ? tunnel.state.url : null);
+    return base ? `${base}/?invite=${encodeURIComponent(invite.token)}` : null;
+  }
+
+  /** Файлы, которые видит гость доски: всё в папке доски и то, на что доска ссылается (заметки, вставки). */
+  const guestFilesCache = new Map<string, { at: number; files: Set<string> }>();
+  async function guestFiles(root: string, board: string): Promise<Set<string>> {
+    const cached = guestFilesCache.get(board);
+    if (cached && Date.now() - cached.at < 5000) return cached.files;
+    const files = new Set<string>();
+    try {
+      for (const f of (await planBoard(root, board, { all: true })).files) files.add(f.path);
+    } catch {
+      // Доски ещё нет на диске — только её папка.
+    }
+    const folder = boardFolderOf(board);
+    if (folder) {
+      const abs = toAbsolute(root, folder);
+      if (await fs.stat(abs).catch(() => null)) for await (const f of walkVault(abs, () => true)) files.add(`${folder}/${f.rel}`);
+    }
+    guestFilesCache.set(board, { at: Date.now(), files });
+    return files;
+  }
+
+  /** Живая доска: вход, поток событий, правки, курсор, выход — для автора и для гостя. */
+  async function handleLive(req: IncomingMessage, res: ServerResponse, url: URL, who: { key: string; role: Role; board: string | null; name: string }): Promise<void> {
+    const board = url.searchParams.get('board') ?? '';
+    if (!/\.board$/i.test(board)) return sendJson(res, 400, { error: 'Нет доски' });
+    if (who.board && who.board !== board) return sendJson(res, 403, { error: 'Эта доска не из приглашения' });
+    const client = url.searchParams.get('client') ?? '';
+    const mine = () => hub.keyOf(board, client) === who.key;
+    if (req.method === 'POST' && url.pathname === '/live/join') {
+      const body = JSON.parse((await readBody(req)) || '{}') as { name?: string };
+      const joined = await hub.join(board, { name: body.name?.trim() || who.name, role: who.role, key: who.key });
+      return sendJson(res, 200, { ...joined, role: who.role });
+    }
+    if (req.method === 'GET' && url.pathname === '/live/events') {
+      if (!mine() || !hub.events(board, client, res)) return sendJson(res, 404, { error: 'Вкладка не на доске — войди заново', rejoin: true });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/live/ops') {
+      if (!mine()) return sendJson(res, 404, { error: 'Вкладка не на доске — войди заново', rejoin: true });
+      const body = JSON.parse(await readBody(req)) as { ops: Op[] };
+      const r = hub.push(board, client, Array.isArray(body.ops) ? body.ops : []);
+      return r ? sendJson(res, 200, r) : sendJson(res, 404, { error: 'Вкладка не на доске', rejoin: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/live/presence') {
+      if (mine()) hub.presence(board, client, (JSON.parse((await readBody(req)) || '{}') as { cursor?: { x: number; y: number } | null }).cursor ?? null);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/live/leave') {
+      if (mine()) hub.leave(board, client);
+      return sendJson(res, 200, { ok: true });
+    }
+    return sendJson(res, 404, { error: 'Нет такого запроса' });
+  }
+
+  /**
+   * Запрос гостя (пришёл через туннель). Гость видит только доску из своего приглашения и её файлы.
+   * Возвращает приглашение, если запрос можно пропустить дальше обычным путём, или 'done' — ответ уже отправлен.
+   */
+  async function handleGuest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<Invite | 'done'> {
+    const p = url.pathname;
+    if (p === '/guest/ping') {
+      // Сайт автора проверяет, в сети ли он, прежде чем отправить гостя сюда.
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      sendJson(res, 200, { ok: true });
+      return 'done';
+    }
+    if (req.method === 'POST' && p === '/guest/login') {
+      const body = JSON.parse((await readBody(req)) || '{}') as { token?: string };
+      const invite = await invites.byToken(body.token ?? null);
+      if (!invite) {
+        sendJson(res, 403, { error: 'Приглашение не найдено — возможно, его отозвали' });
+        return 'done';
+      }
+      const https = req.headers['x-forwarded-proto'] === 'https' || String(req.headers['cf-visitor'] ?? '').includes('https');
+      res.setHeader('Set-Cookie', `${INVITE_COOKIE}=${encodeURIComponent(invite.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${https ? '; Secure' : ''}`);
+      sendJson(res, 200, { ok: true, board: invite.board });
+      return 'done';
+    }
+    const invite = await invites.byToken(cookieOf(req, INVITE_COOKIE));
+    if (!invite) {
+      sendJson(res, 401, { error: 'Сюда можно только по ссылке-приглашению', guest: true });
+      return 'done';
+    }
+    const root = await currentRoot();
+    if (!root) {
+      sendJson(res, 503, { error: 'Автор ещё не настроил vaultboard' });
+      return 'done';
+    }
+    const deny = (why = 'Гостю это недоступно') => {
+      sendJson(res, 403, { error: why });
+      return 'done' as const;
+    };
+    if (p === '/guest/me') {
+      sendJson(res, 200, { guest: true, role: invite.role, board: invite.board, title: boardTitleOf(invite.board), owner: await ownerName(), label: invite.label });
+      return 'done';
+    }
+    if (p.startsWith('/live/')) {
+      await handleLive(req, res, url, { key: `invite:${invite.id}`, role: invite.role, board: invite.board, name: invite.label || 'Гость' });
+      return 'done';
+    }
+    // Настройки, библиотека стилей, история отмены — у гостя своих нет.
+    if (p === '/settings' && req.method === 'GET') {
+      sendJson(res, 200, {});
+      return 'done';
+    }
+    if (p === '/library' && req.method === 'GET') {
+      sendJson(res, 200, {});
+      return 'done';
+    }
+    if (p === '/history') {
+      if (req.method === 'GET') res.end('');
+      else sendJson(res, 200, { ok: true });
+      return 'done';
+    }
+    const allowed = await guestFiles(root, invite.board);
+    const folder = boardFolderOf(invite.board);
+    const inFolder = (rel: string) => !!folder && rel.startsWith(`${folder}/`) && !rel.split('/').some((part) => part === '..' || part.startsWith('.'));
+    if (p === '/files' && req.method === 'GET') {
+      sendJson(res, 200, { files: [...allowed].map((path) => ({ path, size: 0, mtime: 0 })) });
+      return 'done';
+    }
+    if (p === '/resolve' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req)) as { from: string; refs: string[] };
+      const found = await resolveRefs(root, body.from, body.refs);
+      for (const k of Object.keys(found)) if (found[k] && !allowed.has(found[k]!)) found[k] = null;
+      sendJson(res, 200, found);
+      return 'done';
+    }
+    const rel = url.searchParams.get('path') ?? '';
+    if ((p === '/file' || p === '/preview') && (req.method === 'GET' || req.method === 'HEAD')) {
+      return allowed.has(rel) || inFolder(rel) ? invite : deny('Этот файл не с доски из приглашения');
+    }
+    if (p === '/upload' && req.method === 'POST') {
+      return invite.role === 'edit' && url.searchParams.get('board') === invite.board ? invite : deny('Добавлять файлы может только участник с правом правки');
+    }
+    if (p === '/doc' && req.method === 'PUT') {
+      // Заметки гость может править только в папке доски — заметки из остальной базы у него только для чтения.
+      return invite.role === 'edit' && inFolder(rel) ? invite : deny('Эту заметку гостю править нельзя');
+    }
+    return deny();
+  }
+
+  /** Приглашения и туннель — только для автора на его компьютере. */
+  async function handleOwnerShare(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    const p = url.pathname;
+    if (p === '/guest/me') {
+      sendJson(res, 200, { guest: false, owner: await ownerName() });
+      return true;
+    }
+    if (p === '/invites') {
+      if (req.method === 'GET') {
+        const board = url.searchParams.get('board');
+        const list = (await invites.list()).filter((i) => !board || i.board === board);
+        const peers = board ? hub.peersOf(board) : [];
+        const s = await readSettings();
+        return sendJson(res, 200, {
+          invites: await Promise.all(list.map(async (i) => ({ ...i, link: await linkFor(i) }))),
+          shared: [...(await invites.sharedBoards())],
+          peers,
+          tunnel: tunnel.state,
+          canDownload: tunnel.canDownload,
+          siteUrl: s.siteUrl ?? '',
+          siteDir: s.siteDir ?? '',
+        }), true;
+      }
+      if (req.method === 'POST') {
+        const body = JSON.parse(await readBody(req)) as { board: string; role: GuestRole; label?: string };
+        if (!/\.board$/i.test(body.board ?? '')) return sendJson(res, 400, { error: 'Пригласить можно на сохранённую доску' }), true;
+        if (!['view', 'comment', 'edit'].includes(body.role)) return sendJson(res, 400, { error: 'Неизвестная роль' }), true;
+        const invite = await invites.create(body.board, body.role, body.label ?? '');
+        logLine(`[приглашение] ${invite.board}: ${invite.role} «${invite.label}»`);
+        return sendJson(res, 200, { ...invite, link: await linkFor(invite) }), true;
+      }
+      const id = url.searchParams.get('id') ?? '';
+      if (req.method === 'PATCH') {
+        const body = JSON.parse(await readBody(req)) as { role?: GuestRole; label?: string };
+        const next = await invites.update(id, body);
+        if (!next) return sendJson(res, 404, { error: 'Нет такого приглашения' }), true;
+        // Роль поменялась — участник переподключится уже с новой.
+        hub.kick((peer) => peer.key === `invite:${id}`);
+        return sendJson(res, 200, next), true;
+      }
+      if (req.method === 'DELETE') {
+        const gone = await invites.remove(id);
+        hub.kick((peer) => peer.key === `invite:${id}`);
+        return sendJson(res, 200, { ok: !!gone }), true;
+      }
+    }
+    if (p === '/tunnel') {
+      if (req.method === 'GET') return sendJson(res, 200, { state: tunnel.state, canDownload: tunnel.canDownload }), true;
+      if (req.method === 'POST') {
+        const body = JSON.parse((await readBody(req)) || '{}') as { action: 'start' | 'stop' | 'download' };
+        if (body.action === 'stop') tunnel.stop();
+        else if (body.action === 'download') {
+          void tunnel.download().then(() => tunnel.start(servePort)).catch((err: Error) => {
+            tunnel.state = { kind: 'error', message: `Не скачался cloudflared: ${err.message}` };
+          });
+        } else void tunnel.start(servePort);
+        return sendJson(res, 200, { state: tunnel.state }), true;
+      }
+    }
+    return false;
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
+
+    // ---------- кто спрашивает: автор на своём компьютере или гость через туннель ----------
+
+    let guest: Invite | null = null;
+    if (isRemote(req)) {
+      const g = await handleGuest(req, res, url);
+      if (g === 'done') return;
+      guest = g;
+    } else {
+      if (foreignOrigin(req)) return sendJson(res, 403, { error: 'Запрос с чужой страницы отклонён' });
+      if (await handleOwnerShare(req, res, url)) return;
+      if (url.pathname.startsWith('/live/')) return handleLive(req, res, url, { key: 'owner', role: 'owner', board: null, name: await ownerName() });
+    }
+    void guest;
 
     // ---------- первая настройка: работает и без выбранной папки ----------
 
@@ -449,7 +732,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
         return sendJson(res, 400, { error: 'Обновление кнопкой работает только в обычной установке (vaultboard.vbs)' });
       }
       sendJson(res, 200, { ok: true });
-      restartWithUpdate();
+      void hub.flush().finally(restartWithUpdate);
       return;
     }
 
@@ -474,6 +757,13 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
           else delete next.author;
         }
         if ('autoUpdate' in raw) next.autoUpdate = raw.autoUpdate !== false;
+        if ('siteUrl' in raw) {
+          const u = raw.siteUrl?.trim().replace(/\/+$/, '');
+          if (u) {
+            if (!/^https?:\/\/[^\s/]+/i.test(u)) return sendJson(res, 400, { error: 'Адрес сайта должен начинаться с https://' });
+            next.siteUrl = u;
+          } else delete next.siteUrl;
+        }
         if ('siteDir' in raw) {
           if (raw.siteDir?.trim()) next.siteDir = path.resolve(raw.siteDir.trim());
           else delete next.siteDir;

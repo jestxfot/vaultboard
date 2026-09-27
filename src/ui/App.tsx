@@ -7,6 +7,10 @@ import { generateBoard } from '../bench/generate.ts';
 import { type PhaseResult, runAutopilot } from '../bench/autopilot.ts';
 import { type BoardEntry, SITE, vault } from '../io/vault.ts';
 import { PublishDialog } from './PublishDialog.tsx';
+import { InviteDialog } from './InviteDialog.tsx';
+import { PresenceLayer } from './PresenceLayer.ts';
+import { LiveSession, type LivePeer } from '../io/live.ts';
+import type { GuestMe } from '../io/vault.ts';
 import { applyTheme, BOARD_BACKGROUND, loadTheme, onSystemTheme, saveTheme, THEME_NAMES, type ThemeChoice } from './theme.ts';
 import { BoardSession, type SaveState } from '../io/session.ts';
 import { BoardView } from '../render/BoardView.ts';
@@ -70,8 +74,15 @@ interface Opened {
   /** Миникарта в углу. */
   minimap: Minimap;
   session: BoardSession | null;
+  /** Общая доска: правки идут через сервер вживую (тогда `session` нет — файл пишет сервер). */
+  live: LiveSession | null;
+  /** Курсоры других участников общей доски. */
+  presence: PresenceLayer | null;
   off: () => void;
 }
+
+/** Имя гостя на общих досках — спрашиваем один раз и запоминаем. */
+const GUEST_NAME_KEY = 'vaultboard:guest-name';
 
 const CAMERA_KEY = 'vaultboard:camera:';
 /** Какая доска была открыта последней — с неё начинается следующий запуск. */
@@ -193,6 +204,23 @@ export function App() {
   const [layersOpen, setLayersOpen] = createSignal(false);
   /** Окно публикации доски на сайт. */
   const [publishing, setPublishing] = createSignal(false);
+  /** Окно приглашений. */
+  const [inviting, setInviting] = createSignal(false);
+  /** Гость по приглашению (null — автор на своём компьютере). */
+  const [guest, setGuest] = createSignal<Extract<GuestMe, { guest: true }> | null>(null);
+  /** Гостю без приглашения — только объяснение, как попасть. */
+  const [needInvite, setNeedInvite] = createSignal('');
+  /** Уже знаем, кто открыл приложение (автор или гость), — до этого не показываем того, что только для автора. */
+  const [known, setKnown] = createSignal(SITE);
+  const owner = () => known() && !SITE && !guest() && !needInvite();
+  /** Доски автора, у которых есть приглашения: их он тоже открывает вживую. */
+  const [shared, setShared] = createSignal<Set<string>>(new Set());
+  /** Кто сейчас на открытой общей доске. */
+  const [peers, setPeers] = createSignal<LivePeer[]>([]);
+  /** Путь открытой доски (обычной или общей). */
+  const boardPath = () => opened?.session?.path ?? opened?.live?.path ?? null;
+  /** Правка доски доступна (не сайт, не зритель и не комментатор). */
+  const canEdit = () => !SITE && (!guest() || guest()!.role === 'edit');
   /** Тема интерфейса: выбор (как в системе / светлая / тёмная) и то, что из него вышло. */
   const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(loadTheme());
   const [theme, setThemeSignal] = createSignal(applyTheme(themeChoice()));
@@ -232,7 +260,7 @@ export function App() {
 
   /** Положить файлы в папку доски (байт в байт) и разложить их на доске у точки. */
   async function uploadFiles(files: File[], at: { x: number; y: number }) {
-    const board = opened?.session?.path;
+    const board = boardPath();
     const ed = opened?.editor;
     if (!board || !ed) {
       flash('Фото сохраняются в папку доски — сначала создай или открой доску');
@@ -271,7 +299,7 @@ export function App() {
 
   /** Папка файлов доски: `Доски/Таймлайн.board` → `Доски/Таймлайн`. */
   function boardFolder(): string | null {
-    const board = opened?.session?.path;
+    const board = boardPath();
     return board ? boardFolderOf(board) : null;
   }
 
@@ -385,7 +413,7 @@ export function App() {
 
   /** Развернуть ссылку в карточку. Сайт не ответил — карточка остаётся с адресом, можно обновить позже. */
   async function unfurlLink(id: string, url: string) {
-    const board = opened?.session?.path ?? '';
+    const board = boardPath() ?? '';
     try {
       const data = await vault.unfurl(url, board);
       opened?.editor.applyUnfurl(id, data);
@@ -465,7 +493,7 @@ export function App() {
   /** Открытую доску поменяли снаружи: нет своих несохранённых правок — перечитать; есть — спросить, чью версию оставить. */
   async function boardChangedOutside(path: string) {
     const s = opened?.session;
-    if (!s || s.path !== path) return;
+    if (!s || s.path !== path) return; // у общей доски (live) нет session — её перечитает сервер
     const mtime = await vault.mtimeOf(path).catch(() => null);
     if (mtime === null || mtime === s.diskMtime) return;
     if (s.hasUnsaved) {
@@ -708,6 +736,14 @@ export function App() {
     setViewer({ items, index: Math.max(0, items.findIndex((i) => i.id === id)) });
   }
 
+  function sharedChanged(list: string[]) {
+    const next = new Set(list);
+    const cur = boardPath();
+    const was = cur ? shared().has(cur) : false;
+    setShared(next);
+    if (cur && was !== next.has(cur)) void openBoard(cur);
+  }
+
   async function refreshBoards() {
     const r = await vault.listBoards();
     setRoot(r.root);
@@ -718,6 +754,12 @@ export function App() {
     if (!opened) return;
     if (opened.session?.hasUnsaved) await opened.session.save();
     opened.session?.close();
+    if (opened.live) {
+      await opened.live.save();
+      opened.live.close();
+    }
+    opened.presence?.destroy();
+    setPeers([]);
     opened.editor.destroy();
     opened.embeds.destroy();
     opened.pins.destroy();
@@ -732,7 +774,7 @@ export function App() {
   }
 
   /** Показать документ на доске: хранилище, редактор, сохранение. */
-  async function mount(doc: BoardDoc, path: string | null, mtime: number | 'new', note: string, started: number) {
+  async function mount(doc: BoardDoc, path: string | null, mtime: number | 'new', note: string, started: number, live: LiveSession | null = null) {
     await closeCurrent();
     const v = view()!;
     const store = new BoardStore(doc);
@@ -743,7 +785,9 @@ export function App() {
     cameraPath = path;
 
     const ed = new Editor(store, v, host, perf);
-    ed.readOnly = SITE;
+    // Сайт и гость без права правки — только смотреть (комментатор ещё и комментирует).
+    ed.readOnly = SITE || (!!live && (live.role === 'view' || live.role === 'comment'));
+    ed.canComment = !!live && live.role === 'comment';
     let uiQueued = false;
     ed.onUi = () => {
       if (uiQueued) return;
@@ -763,7 +807,7 @@ export function App() {
     ed.onQuickOpen = () => setQuick(true);
     ed.onUnfurl = (id, url) => void unfurlLink(id, url);
     const embeds = new EmbedLayer(host, v, store, () => ed.ui().selection);
-    embeds.sticky = SITE;
+    embeds.sticky = ed.readOnly;
     const minimap = new Minimap(host, v, store);
     minimap.setVisible(minimapOn());
     const comments = new Comments(store, v);
@@ -790,8 +834,24 @@ export function App() {
 
     let session: BoardSession | null = null;
     let restored = 0;
-    // На сайте доска только читается: ни сохранения, ни истории отмены.
-    if (path && !SITE) {
+    let presence: PresenceLayer | null = null;
+    if (live) {
+      // Общая доска: файл пишет сервер, правки уходят ему; история отмены — только на этот сеанс.
+      presence = new PresenceLayer(host, v);
+      const p = presence;
+      live.onState = setSave;
+      live.onPeers = (list) => {
+        setPeers([...list]);
+        p.setPeers(list, live.client);
+      };
+      live.onCursor = (id, c) => p.cursor(id, c);
+      live.onKicked = () => {
+        setError(guest() ? 'Автор отозвал приглашение или поменял твою роль — открой ссылку заново' : 'Сервер отключил эту вкладку от доски');
+        ed.readOnly = true;
+      };
+      live.start(store);
+    } else if (path && !SITE) {
+      // На сайте доска только читается: ни сохранения, ни истории отмены.
       session = new BoardSession(store, path, mtime);
       session.onState = (st) => {
         setSave(st);
@@ -800,21 +860,60 @@ export function App() {
       };
       restored = await session.start();
     }
-    opened = { store, editor: ed, embeds, comments, pins, minimap, session, off };
+    opened = { store, editor: ed, embeds, comments, pins, minimap, session, live, presence, off };
     if (import.meta.env.DEV) Object.assign(window, { __store: store, __editor: ed });
     setEditor(ed);
     setUi(ed.ui());
     setCurrent(path ?? note);
     if (SITE && path) document.title = `${boardTitleOf(path)} — vaultboard`;
     setError('');
-    const historyNote = restored ? ` · история: ${restored} шагов назад` : '';
+    const historyNote = restored ? ` · история: ${restored} шагов назад` : live ? ' · общая доска, правки видны всем вживую' : '';
     setStatus(`${note} · ${doc.items.length} объектов · открыто за ${(performance.now() - started).toFixed(0)} мс${historyNote}`);
+  }
+
+  /** Имя на общей доске: у автора — из настроек, у гостя — спросим один раз. */
+  function liveName(): string {
+    const g = guest();
+    if (!g) return author();
+    let name = '';
+    try {
+      name = localStorage.getItem(GUEST_NAME_KEY) ?? '';
+    } catch {
+      // Не запомнится — спросим в следующий раз.
+    }
+    if (!name) {
+      name = (window.prompt('Как тебя подписать на доске? Это имя увидят остальные.', g.label || '') ?? '').trim().slice(0, 40) || g.label || 'Гость';
+      try {
+        localStorage.setItem(GUEST_NAME_KEY, name);
+      } catch {
+        // Не запомнится.
+      }
+    }
+    return name;
+  }
+
+  async function openLive(path: string, started: number) {
+    const live = new LiveSession(path, liveName());
+    const text = await live.join();
+    await mount(parseBoard(text), path, 'new', guest() ? `Доска автора ${guest()!.owner}` : 'Общая доска', started, live);
   }
 
   async function openBoard(path: string) {
     const started = performance.now();
     setBench(null);
     try {
+      if (guest() || shared().has(path)) {
+        await openLive(path, started);
+        if (!guest()) {
+          history.replaceState(null, '', `?open=${encodeURIComponent(path)}`);
+          try {
+            localStorage.setItem(LAST_BOARD_KEY, path);
+          } catch {
+            // Не запомнится.
+          }
+        }
+        return;
+      }
       if (path.toLowerCase().endsWith('.canvas')) {
         // Доска Obsidian открывается как наша копия — папкой рядом с ней: оригинал .canvas не трогаем.
         const target = `${path.replace(/\.canvas$/i, '')}/${BOARD_FILE}`;
@@ -898,6 +997,7 @@ export function App() {
       opened?.embeds.update();
       opened?.pins.update();
       opened?.minimap.cameraChanged();
+      opened?.presence?.update();
       const path = cameraPath;
       if (path) {
         clearTimeout(cameraTimer);
@@ -908,6 +1008,11 @@ export function App() {
     // Координаты курсора в углу: не чаще раза в кадр.
     let cursorFrame = 0;
     host.addEventListener('pointermove', (e) => {
+      // Курсор для участников общей доски — сразу (сессия сама шлёт не чаще раза в 60 мс).
+      if (opened?.live) {
+        const r = host.getBoundingClientRect();
+        opened.live.cursor(v.screenToWorld(e.clientX - r.left, e.clientY - r.top));
+      }
       if (cursorFrame) return;
       cursorFrame = requestAnimationFrame(() => {
         cursorFrame = 0;
@@ -915,13 +1020,35 @@ export function App() {
         setCursor(v.screenToWorld(e.clientX - r.left, e.clientY - r.top));
       });
     });
-    host.addEventListener('pointerleave', () => setCursor(null));
+    host.addEventListener('pointerleave', () => {
+      setCursor(null);
+      opened?.live?.cursor(null);
+    });
     // Щелчок по доске мимо окна обсуждения закрывает его, как в Miro (булавки открывают своё сами).
     host.addEventListener('pointerdown', (e) => {
       if ((openThread() || draft()) && !(e.target as HTMLElement).closest('.comment-pin')) closeThread();
     }, true);
     v.setDocs(docs, markdown);
+    /** Гость по приглашению — откроем его доску; без приглашения (blocked) — ничего не открываем. */
+    let guestBoard: string | null = null;
+    let blocked = false;
     if (SITE) {
+      const invite = new URLSearchParams(location.search).get('invite');
+      if (invite) {
+        // Ссылка-приглашение ведёт на сайт с постоянным адресом, а сайт — к автору, пока его vaultboard в сети.
+        try {
+          const live = (await (await fetch('live.json', { cache: 'no-store' })).json()) as { url?: string | null };
+          if (live.url && (await fetch(`${live.url}/api/guest/ping`, { cache: 'no-store' })).ok) {
+            location.replace(`${live.url}/?invite=${encodeURIComponent(invite)}`);
+            return;
+          }
+        } catch {
+          // Автора нет в сети — покажем опубликованный снимок.
+        }
+        setNeedInvite('offline');
+        flash('Автор сейчас не в сети — показан опубликованный снимок доски. Правка по приглашению откроется, когда он будет в сети.');
+        history.replaceState(null, '', location.pathname);
+      }
       // Сайт: список досок и файлов — из манифеста рядом со страницей.
       try {
         await vault.init();
@@ -930,12 +1057,36 @@ export function App() {
       }
       void files.refresh().catch(() => undefined);
     } else {
-      // Папка с досками ещё не выбрана (новый компьютер) — сначала первая настройка, остальное после неё.
-      const info = await vault.setup().catch(() => null);
-      if (info && !info.root) setSetup(info);
-      else {
+      // Пришли по ссылке-приглашению: сервер запомнит приглашение, а ссылку уберём из адреса.
+      const invite = new URLSearchParams(location.search).get('invite');
+      if (invite) {
+        await vault.guestLogin(invite).catch((err: Error) => setNeedInvite(err.message));
+        history.replaceState(null, '', location.pathname);
+      }
+      const me = await vault.guestMe().catch((err: Error) => {
+        setNeedInvite((cur) => cur || err.message);
+        return null;
+      });
+      setKnown(true);
+      if (me?.guest) {
+        setGuest(me);
+        setBoards([{ path: me.board, kind: 'board', size: 0, mtime: 0 }]);
+        setRoot(`Доска ${me.owner} · ты ${me.role === 'edit' ? 'правишь' : me.role === 'comment' ? 'комментируешь' : 'смотришь'}`);
+        document.title = `${me.title} — vaultboard`;
         void files.refresh().catch(() => undefined);
-        void vault.getLibrary().then(setLibrary).catch(() => undefined);
+        guestBoard = me.board;
+      } else if (!me) {
+        blocked = true;
+      } else {
+        const sharedNow = await vault.invites('').catch(() => null);
+        if (sharedNow) setShared(new Set(sharedNow.shared));
+        // Папка с досками ещё не выбрана (новый компьютер) — сначала первая настройка, остальное после неё.
+        const info = await vault.setup().catch(() => null);
+        if (info && !info.root) setSetup(info);
+        else {
+          void files.refresh().catch(() => undefined);
+          void vault.getLibrary().then(setLibrary).catch(() => undefined);
+        }
       }
     }
     if (import.meta.env.DEV) Object.assign(window, { __view: v, __docs: docs, __files: files });
@@ -946,6 +1097,10 @@ export function App() {
     const onUnload = (e: BeforeUnloadEvent) => {
       if (opened?.session?.hasUnsaved) {
         void opened.session.save();
+        e.preventDefault();
+      }
+      if (opened?.live?.hasUnsaved) {
+        void opened.live.save();
         e.preventDefault();
       }
     };
@@ -965,6 +1120,11 @@ export function App() {
       v.destroy();
     });
 
+    if (guestBoard) {
+      await openBoard(guestBoard);
+      return;
+    }
+    if (blocked) return;
     if (!SITE) void watchOutsideChanges();
     const params = new URLSearchParams(location.search);
     if (!setup()) await refreshBoards().catch((err: Error) => setError(err.message));
@@ -992,12 +1152,12 @@ export function App() {
         onMouseLeave={() => collapsed() && setPeek(false)}
       >
         <div class="side-head">
-          <button class="side-brand" title={SITE ? 'vaultboard' : 'Мастер настройки: папка с досками, имя, обновления'} onClick={() => !SITE && void openWizard()}>
+          <button class="side-brand" title={owner() ? 'Мастер настройки: папка с досками, имя, обновления' : 'vaultboard'} onClick={() => owner() && void openWizard()}>
             <span class="logo">vb</span>
             <span class="side-title">
               <b>
                 vaultboard{' '}
-                <Show when={!SITE}>
+                <Show when={owner()}>
                 <span
                   class="side-version"
                   role="button"
@@ -1027,7 +1187,7 @@ export function App() {
         </div>
         <div class="section">
           Доски
-          <Show when={!SITE}>
+          <Show when={owner()}>
             <button class="section-btn" title="Новая доска" onClick={() => setNewName(newName() === null ? 'Доски/Новая доска' : null)}>+</button>
           </Show>
         </div>
@@ -1067,7 +1227,7 @@ export function App() {
         <Show when={collapsed() && !peek()}>
           <div class="sidebar-edge" onMouseEnter={() => setPeek(true)} title="Доски" />
         </Show>
-        <Show when={editor() && ui() && !SITE}>
+        <Show when={editor() && ui() && canEdit() && known()}>
           <Toolbar
             editor={editor()!}
             ui={ui()!}
@@ -1088,8 +1248,16 @@ export function App() {
             <button class="icon-btn topbar-btn" title="Доски" onClick={() => setPeek(!peek())}>☰</button>
           </Show>
           <span class="title">{current() || 'Выбери доску слева'}</span>
-          <Show when={!SITE && /\.board$/i.test(current())}>
+          <Show when={owner() && /\.board$/i.test(current())}>
+            <button class="topbar-publish" title="Пригласить на эту доску по ссылке: смотреть, комментировать или править вместе вживую" onClick={() => setInviting(true)}>
+              {shared().has(current()) ? 'Общая · пригласить' : 'Пригласить'}
+            </button>
             <button class="topbar-publish" title="Опубликовать доску на сайт — только для просмотра" onClick={() => setPublishing(true)}>Опубликовать</button>
+          </Show>
+          <Show when={peers().length > 1}>
+            <span class="peers" title={`На доске: ${peers().map((p) => p.name).join(', ')}`}>
+              <For each={peers()}>{(p) => <span class="peer-dot" style={{ background: p.color }}>{p.name.slice(0, 1).toUpperCase()}</span>}</For>
+            </span>
           </Show>
           <Show when={save()}>
             <span class="save" classList={{ bad: save()!.kind === 'error' || save()!.kind === 'conflict' }}>{saveLabel(save()!)}</span>
@@ -1112,7 +1280,7 @@ export function App() {
           <div class="notice">{notice()}</div>
         </Show>
         <div class="corner">
-          <Show when={editor() && ui() && !SITE}>
+          <Show when={editor() && ui() && !SITE && known()}>
             {(() => {
               const threads = () => (ui(), opened?.comments.threads ?? []);
               const open = () => threads().filter((t) => !isDone(t)).length;
@@ -1137,7 +1305,7 @@ export function App() {
               );
             })()}
           </Show>
-          <Show when={editor() && ui() && !SITE}>
+          <Show when={editor() && ui() && canEdit() && known()}>
             <button
               class="help-btn layers-btn"
               classList={{ on: layersOpen() }}
@@ -1159,7 +1327,7 @@ export function App() {
           <button class="help-btn" classList={{ on: minimapOn() }} title={minimapOn() ? 'Скрыть миникарту' : 'Показать миникарту'} onClick={() => setMinimapOn(!minimapOn())}>
             <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="4" width="15" height="12" rx="1.5" /><rect x="9" y="8.5" width="6" height="5" rx=".8" fill="currentColor" fill-opacity=".25" /></svg>
           </button>
-          <Show when={!SITE}>
+          <Show when={owner()}>
             <button class="help-btn" title="Настройки" onClick={() => setSettings(true)}>⚙</button>
             <button class="help-btn" title="Горячие клавиши" onClick={() => setHelp(true)}>?</button>
           </Show>
@@ -1196,7 +1364,7 @@ export function App() {
             />
           )}
         </Show>
-        <Show when={!SITE}>
+        <Show when={owner()}>
         <Updater
           onStatus={setUpdate}
           onNotice={flash}
@@ -1205,6 +1373,18 @@ export function App() {
             if (opened?.session?.hasUnsaved) await opened.session.save();
           }}
         />
+        </Show>
+        <Show when={inviting() && /\.board$/i.test(current())}>
+          <InviteDialog board={current()} title={boardTitleOf(current())} onClose={() => setInviting(false)} onChanged={sharedChanged} />
+        </Show>
+        <Show when={needInvite() && needInvite() !== 'offline' && !SITE}>
+          <div class="guest-gate">
+            <div class="dialog setup">
+              <div class="setup-title">Нужна ссылка-приглашение</div>
+              <div class="step-note">{needInvite()}</div>
+              <div class="step-note">Это доска vaultboard на чужом компьютере. Попроси у автора ссылку-приглашение и открой её.</div>
+            </div>
+          </div>
         </Show>
         <Show when={publishing() && /\.board$/i.test(current())}>
           <PublishDialog board={current()} onClose={() => setPublishing(false)} onDone={flash} />

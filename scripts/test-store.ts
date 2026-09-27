@@ -1,6 +1,7 @@
 // Проверка хранилища и журнала истории: правки, отмена, повтор, жесты, восстановление истории с диска.
 // Запуск: node scripts/test-store.ts
-import { BoardStore, type HistoryEvent } from '../src/model/store.ts';
+import { BoardStore, type HistoryEvent, type Op } from '../src/model/store.ts';
+import { allowedOps, LiveHub } from '../server/live.ts';
 import { encodeOps, type LogLine, parseLog, rebuildHistory } from '../src/model/historyCodec.ts';
 import { emptyBoard, serializeBoard } from '../src/format/board.ts';
 import { makeLine, makeSticky } from '../src/model/factory.ts';
@@ -313,6 +314,65 @@ console.log('\nПубликация');
   check(links.resolve('кадр.png') === 'Доски/Тест/фото/кадр.png', 'вставка находится по имени файла в любой папке');
   check(links.resolve('Укус 83', 'Доски/Тест/доска.board') === 'Доски/Тест/Укус 83.md', 'из одноимённых — ближайшая к текущей');
   check(embedTargets('текст ![[кадр.png|300]] и [[Укус 83]] ещё ![[схема.jpg]]').join() === 'кадр.png,схема.jpg', 'вставки ![[…]] без подписи и размера, обычные ссылки не считаются');
+}
+
+console.log('\nСовместная правка');
+{
+  // Две вкладки и сервер: у всех одна и та же доска.
+  const base = () => {
+    const d = emptyBoard();
+    d.items.push(makeSticky('a', 0, 0), makeSticky('b', 300, 0));
+    return d;
+  };
+  const A = new BoardStore(base()), B = new BoardStore(base());
+  const x = (st: BoardStore, id: string) => (st.get(id) as StickyItem | undefined)?.x;
+  const bx = x(A, 'b');
+  // Гость вставил объект в начало (номера у всех сдвинулись), автор тем временем подвинул «b».
+  B.transact('+', () => B.insert(makeSticky('g', 0, 400), 0));
+  const fromB = (B as unknown as { undoStack: { ops: Op[] }[] }).undoStack.at(-1)!.ops;
+  A.update<StickyItem>('b', { x: 500 });
+  A.applyRemote(fromB);
+  check(A.items.map((i) => i.id).join() === 'g,a,b', `чужая вставка встаёт на своё место (${A.items.map((i) => i.id).join()})`);
+  check(x(A, 'b') === 500, 'своя правка при этом не теряется');
+  // Отмена своей правки после чужой вставки трогает ровно свой объект, хотя его номер сдвинулся.
+  A.undo();
+  check(x(A, 'b') === bx && A.items.length === 3 && A.has('g'), 'Ctrl+Z после чужой вставки отменяет своё, а не чужое');
+  // Правка объекта, который другой уже удалил, просто пропускается.
+  const C = new BoardStore(base());
+  C.applyRemote([{ t: 'delete', index: 0, item: C.get('a')! }]);
+  C.applyRemote([{ t: 'replace', index: 0, before: makeSticky('a', 0, 0), after: { ...makeSticky('a', 0, 0), x: 999 } }]);
+  check(!C.has('a') && C.items.length === 1, 'правка удалённого объекта не воскрешает его');
+  // Вставка уже существующего (пришла дважды) — замена, а не второй объект.
+  C.applyRemote([{ t: 'insert', index: 0, item: { ...makeSticky('b', 0, 0), x: 7 } }]);
+  check(C.items.length === 1 && x(C, 'b') === 7, 'повторная вставка того же объекта не плодит копию');
+  // Сервер прислал свою версию доски целиком — вкладка становится такой же.
+  const D = new BoardStore(base());
+  D.update<StickyItem>('a', { x: 42 });
+  const server = base();
+  server.items.push(makeSticky('n', 9, 9));
+  D.resetTo(server);
+  check(D.items.map((i) => `${i.id}:${(i as StickyItem).x}`).join() === server.items.map((i) => `${i.id}:${(i as StickyItem).x}`).join() && !D.canUndo, 'сброс к версии сервера: доска как на сервере, отмена очищена');
+
+  // Роли: зритель ничего не меняет, комментатор — только обсуждения.
+  const thread: Op = { t: 'thread', index: 0, before: null, after: { id: 't', x: 0, y: 0, messages: [] } };
+  const move: Op = { t: 'replace', index: 0, before: makeSticky('a', 0, 0), after: { ...makeSticky('a', 0, 0), x: 5 } };
+  check(allowedOps('view', [thread, move]).length === 0, 'зритель не может ничего поменять');
+  check(allowedOps('comment', [thread, move]).map((o) => o.t).join() === 'thread', 'комментатор — только обсуждения');
+  check(allowedOps('edit', [thread, move]).length === 2, 'участник с правом правки — всё');
+
+  // Сервер: правки двух участников по очереди, итог — у последнего; файл пишется.
+  let written = '';
+  const hub = new LiveHub({ read: async () => serializeBoard(base()), write: async (_b, text) => void (written = text) });
+  const ja = await hub.join('X/доска.board', { name: 'Автор', role: 'owner', key: 'owner' });
+  const jv = await hub.join('X/доска.board', { name: 'Зритель', role: 'view', key: 'invite:v' });
+  const jb = await hub.join('X/доска.board', { name: 'Гость', role: 'edit', key: 'invite:e' });
+  const mv = (x: number): Op => ({ t: 'replace', index: 0, before: makeSticky('a', 0, 0), after: { ...makeSticky('a', 0, 0), x } });
+  hub.push('X/доска.board', ja.client, [mv(10)]);
+  hub.push('X/доска.board', jb.client, [mv(20)]);
+  check(hub.push('X/доска.board', jv.client, [mv(30)])!.applied === 0, 'сервер не принимает правки зрителя');
+  check(hub.keyOf('X/доска.board', jb.client) === 'invite:e', 'вкладка привязана к своему приглашению');
+  await new Promise((r) => setTimeout(r, 700));
+  check(written.includes('"x": 20') || written.includes('"x":20'), 'сервер сам записал доску с последней правкой');
 }
 
 console.log(failed ? `\nОшибок: ${failed}` : '\nВсё прошло.');

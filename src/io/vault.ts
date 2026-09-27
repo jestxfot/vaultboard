@@ -26,6 +26,8 @@ export interface Settings {
   autoUpdate?: boolean;
   /** Папка сайта для публикации досок. */
   siteDir?: string;
+  /** Адрес опубликованного сайта — ссылки-приглашения ведут на него. */
+  siteUrl?: string;
   /** Имя пользователя системы — имя в комментариях по умолчанию. */
   defaultAuthor?: string;
   /** Папка базы задана переменной VAULT_ROOT (разработка) — в настройках её не поменять. */
@@ -237,7 +239,63 @@ const serverVault = {
 
   unpublish: (board: string, dir: string, push: boolean) =>
     request<{ removed: number; git: { ok: boolean; output: string } | null }>('/api/publish/remove', { method: 'POST', body: JSON.stringify({ board, dir, push }) }),
+
+  // ---------- совместная правка ----------
+
+  /** Кто я для сервера: автор на своём компьютере или гость по приглашению. 401 — гость без приглашения. */
+  guestMe: () => request<GuestMe>('/api/guest/me'),
+
+  /** Войти по ссылке-приглашению (сервер запомнит приглашение в cookie). */
+  guestLogin: (token: string) => request<{ ok: boolean; board: string }>('/api/guest/login', { method: 'POST', body: JSON.stringify({ token }) }),
+
+  invites: (board: string) => request<InvitesInfo>(`/api/invites?board=${encodeURIComponent(board)}`),
+
+  createInvite: (board: string, role: GuestRole, label: string) =>
+    request<InviteInfo>('/api/invites', { method: 'POST', body: JSON.stringify({ board, role, label }) }),
+
+  updateInvite: (id: string, change: { role?: GuestRole; label?: string }) =>
+    request<InviteInfo>(`/api/invites?id=${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(change) }),
+
+  deleteInvite: (id: string) => request<{ ok: boolean }>(`/api/invites?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  tunnel: (action: 'start' | 'stop' | 'download') => request<{ state: TunnelState }>('/api/tunnel', { method: 'POST', body: JSON.stringify({ action }) }),
 };
+
+export type GuestRole = 'view' | 'comment' | 'edit';
+
+export type GuestMe =
+  | { guest: false; owner: string }
+  | { guest: true; role: GuestRole; board: string; title: string; owner: string; label: string };
+
+export type TunnelState =
+  | { kind: 'off' }
+  | { kind: 'missing' }
+  | { kind: 'downloading'; percent: number }
+  | { kind: 'starting' }
+  | { kind: 'on'; url: string; since: string }
+  | { kind: 'error'; message: string };
+
+export interface InviteInfo {
+  id: string;
+  token: string;
+  board: string;
+  role: GuestRole;
+  label: string;
+  created: string;
+  /** Ссылка для гостя; null — пока нет ни адреса сайта, ни туннеля. */
+  link: string | null;
+}
+
+export interface InvitesInfo {
+  invites: InviteInfo[];
+  /** Доски, у которых есть приглашения (их автор открывает вживую). */
+  shared: string[];
+  peers: { id: string; name: string; role: string; color: string }[];
+  tunnel: TunnelState;
+  canDownload: boolean;
+  siteUrl: string;
+  siteDir: string;
+}
 
 // ---------- сайт: только просмотр ----------
 
@@ -322,6 +380,13 @@ const siteVault: typeof serverVault = {
   siteInfo: async () => readOnly(),
   publish: async () => readOnly(),
   unpublish: async () => readOnly(),
+  guestMe: async () => ({ guest: false as const, owner: "" }),
+  guestLogin: async () => readOnly(),
+  invites: async () => readOnly(),
+  createInvite: async () => readOnly(),
+  updateInvite: async () => readOnly(),
+  deleteInvite: async () => readOnly(),
+  tunnel: async () => readOnly(),
 };
 
 export const vault: typeof serverVault = SITE ? siteVault : serverVault;
