@@ -24,7 +24,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # Electron и инструменты electron-builder (NSIS, 7-Zip, AppImage, fpm) — не скачивать заново каждый раз.
+      # Electron и инструменты electron-builder (NSIS, 7-Zip, AppImage) — не скачивать заново каждый раз.
       # Ключ — package-lock.json: обновили Electron или electron-builder — кэш соберётся заново.
       - uses: actions/cache@v4
         with:
@@ -46,7 +46,6 @@ jobs:
           path: |
             release/*.exe
             release/*.AppImage
-            release/*.deb
             release/*.blockmap
             release/latest*.yml
           if-no-files-found: error
@@ -77,7 +76,7 @@ jobs:
             git log --pretty=format:'- %s' ${prev:+$prev..}$TAG | grep -v '^- Релиз v' || echo '- первый релиз'
             echo
             echo
-            echo "**Установка:** Windows — скачай \`vaultboard-setup-${TAG#v}.exe\` ниже и запусти. Linux — AppImage или .deb."
+            echo "**Установка:** Windows — скачай \`vaultboard-setup-${TAG#v}.exe\` ниже и запусти. Linux — \`vaultboard-${TAG#v}-x86_64.AppImage\`."
             echo 'У кого vaultboard уже стоит — новая версия скачается сама и поставится при выходе.'
           } > notes.md
           gh release create "$TAG" release/* --title "vaultboard $TAG" --notes-file notes.md

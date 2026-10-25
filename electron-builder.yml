@@ -67,9 +67,9 @@ nsis:
   artifactName: vaultboard-setup-${version}.${ext}
 
 linux:
+  # Только AppImage: запускается без установки и обновляется сам (.deb не обновлялся бы и удлинял сборку).
   target:
     - AppImage
-    - deb
   category: Office
   icon: resources/icon.png
   executableName: vaultboard
@@ -77,5 +77,4 @@ linux:
   syncDesktopName: true
   synopsis: Бесконечная доска поверх обычных файлов
   description: Бесконечная доска в духе Miro, которая хранит всё обычными файлами на диске.
-  maintainer: jestxfot <87380272+jestxfot@users.noreply.github.com>
   artifactName: vaultboard-${version}-${arch}.${ext}
