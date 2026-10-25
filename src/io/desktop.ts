@@ -6,6 +6,8 @@ export interface DesktopBridge {
   installUpdate(): void;
   /** Строка в журнал приложения (%TEMP%\\vaultboard.log). */
   log(text: string): void;
+  /** Записать в журнал, кто сейчас занимает видеокарту (Windows). */
+  logGpuLoad(when: string): void;
   /** Выбрать папку окном системы; отмена — null. */
   pickFolder(start?: string): Promise<string | null>;
   /** Окно открывает доску. false — она уже открыта в другом окне (приложение показало то окно). */

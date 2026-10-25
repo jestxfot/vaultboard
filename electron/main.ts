@@ -7,6 +7,7 @@
 //
 // Второй запуск (ярлык, двойной щелчок по .board) не запускает вторую копию: первая открывает доску или показывает окно.
 import { app, BrowserWindow, dialog, ipcMain, Menu, session } from 'electron';
+import { execFile } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { LOG, log } from './log.ts';
@@ -78,6 +79,35 @@ function logGpu(): void {
   );
 }
 
+/**
+ * Кто сейчас занимает видеокарту (как столбец «Графический процессор» в диспетчере задач): программы и их загрузка
+ * по видам работы (3D, вычисления, копирование). Только Windows; для разбора «тормозит» — например, когда
+ * видеокарту делит нейросеть. Пишется в журнал (замер скорости вызывает это в начале и в конце).
+ */
+function logGpuLoad(when: string): void {
+  if (process.platform !== 'win32') return;
+  // Класс WMI, а не Get-Counter: имена счётчиков Get-Counter переведены на язык Windows, имя класса — нет.
+  const ps =
+    'Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | ' +
+    'Where-Object UtilizationPercentage -gt 1 | ForEach-Object { ' +
+    "if ($_.Name -match 'pid_(\\d+).*engtype_(.+)$') { " +
+    '$p = Get-Process -Id $matches[1] -ErrorAction SilentlyContinue; ' +
+    "'{0}|{1}|{2}' -f $p.ProcessName, $matches[2], $_.UtilizationPercentage } }";
+  execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true, timeout: 20_000 }, (err, out) => {
+    if (err) return log(`видеокарта занята (${when}): не узнать (${err.message.split('\n')[0]})`);
+    // Процесс и вид работы → наибольшая загрузка (у одного процесса бывает несколько движков одного вида).
+    const load = new Map<string, number>();
+    for (const line of out.split(/\r?\n/)) {
+      const [name, engine, value] = line.trim().split('|');
+      if (!name || !engine) continue;
+      const key = `${name} (${engine})`;
+      load.set(key, Math.max(load.get(key) ?? 0, Number(value.replace(',', '.')) || 0));
+    }
+    const top = [...load].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k} ${v.toFixed(0)}%`);
+    log(`видеокарта занята (${when}): ${top.join(', ') || 'почти свободна'}`);
+  });
+}
+
 /** Раз в 30 секунд, если какой-то процесс приложения заметно занят: кто сколько ест процессора и памяти. */
 function watchLoad(): void {
   app.getAppMetrics();
@@ -134,6 +164,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   ipcMain.on('update-install', restartWithUpdate);
   ipcMain.on('log', (_e, text: unknown) => log(`окно: ${String(text).slice(0, 500)}`));
+  ipcMain.on('log-gpu-load', (_e, when: unknown) => logGpuLoad(String(when).slice(0, 60)));
   ipcMain.handle('claim-board', (e, rel: unknown) => claimBoard(e.sender, String(rel)));
   ipcMain.on('open-in-new-window', (e, rel: unknown) => void openInNewWindow(e.sender, String(rel)));
   ipcMain.handle('pick-folder', async (e, start: unknown) => {

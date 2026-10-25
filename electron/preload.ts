@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('vaultboardDesktop', {
   log(text: string): void {
     ipcRenderer.send('log', String(text).slice(0, 500));
   },
+  /** Записать в журнал, кто сейчас занимает видеокарту (Windows). */
+  logGpuLoad(when: string): void {
+    ipcRenderer.send('log-gpu-load', when);
+  },
   /** Выбрать папку окном системы; отмена — null. */
   pickFolder(start?: string): Promise<string | null> {
     return ipcRenderer.invoke('pick-folder', start ?? '');

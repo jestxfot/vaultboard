@@ -1011,8 +1011,10 @@ export function App() {
     while (document.visibilityState !== 'visible') await new Promise((r) => setTimeout(r, 100));
     for (let i = 0; i < 10; i++) await new Promise((r) => requestAnimationFrame(r));
     desktop?.log('замер скорости: начало');
+    desktop?.logGpuLoad('начало замера');
     for (const count of [300, 2000]) {
       for (const cache of [true, false]) {
+        if (count === 2000 && !cache) desktop?.logGpuLoad('середина замера');
         const mode = cache ? 'снимок' : 'без снимка';
         await mount(generateBoard(count), null, 'new', `Замер: ${count} объектов, ${mode} (не сохраняется)`, performance.now());
         const v = view()!;
