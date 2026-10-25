@@ -5,7 +5,7 @@ import { checkForUpdates, readyVersion } from './updates.ts';
 import { openBoardDialog, openBoardFile, recentBoards, showWindow } from './windows.ts';
 
 let tray: Tray | null = null;
-let actions = { installUpdate: () => {}, quit: () => {} };
+let actions = { installUpdate: () => {}, quit: () => {}, softwareRender: false, toggleSoftwareRender: () => {} };
 
 /** Название доски для меню: папка доски (Проект/доска.board → «Проект») или имя файла. */
 function title(file: string): string {
@@ -26,6 +26,13 @@ export function updateTrayMenu(): void {
       },
       { label: 'Открыть доску…', click: () => void openBoardDialog() },
       { type: 'separator' },
+      {
+        label: 'Рисовать без видеокарты',
+        toolTip: 'Если видеокарту занимает другая программа (например, нейросеть) и доска двигается рывками. Перезапускает vaultboard.',
+        type: 'checkbox',
+        checked: actions.softwareRender,
+        click: () => actions.toggleSoftwareRender(),
+      },
       ...(version
         ? [{ label: `Перезапустить с версией ${version}`, click: () => actions.installUpdate() }]
         : app.isPackaged
@@ -36,7 +43,7 @@ export function updateTrayMenu(): void {
   );
 }
 
-export function createTray(icon: string, opts: { installUpdate: () => void; quit: () => void }): void {
+export function createTray(icon: string, opts: typeof actions): void {
   actions = opts;
   // В Windows — сам .ico: система берёт из него размер под свой масштаб экрана.
   tray = new Tray(process.platform === 'win32' ? icon : nativeImage.createFromPath(icon).resize({ width: 24, height: 24 }));

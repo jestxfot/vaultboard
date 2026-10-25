@@ -9,7 +9,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts';
+import { listVaultFiles, resolveRefs, toAbsolute, VaultPathError, walkVault } from './vaultFs.ts';
 import { createGithubRepo, ghReady, gitPush, gitRemote, isGitRepo, planBoard, publishBoard, readManifest, suggestSiteDirs, unpublishBoard } from './publish.ts';
 import { cookieOf, foreignOrigin, INVITE_COOKIE, type Invite, InviteStore, isRemote, type GuestRole } from './access.ts';
 import { LiveHub, type Role } from './live.ts';
@@ -214,10 +214,13 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
    * пишут в свои скрытые папки, заставляли бы вкладки перечитывать список файлов раз в секунду.
    */
   const IGNORE = /(^|\/)(\.|node_modules(\/|$)|~syncthing~|~\$)|\.tmp-\d+-\d+$|\.vb-update$|\.tmp$/i;
-  /** Список файлов базы (для /files): обходить всю папку заново, только когда в ней что-то поменялось. */
-  let filesCache: { root: string; gen: number; files: { path: string; size: number; mtime: number }[] } | null = null;
-  /** Растёт, когда в папке появился, исчез или переименован файл — список, собранный раньше, уже не годится. */
-  let filesGen = 0;
+  /**
+   * Все файлы базы (для /files): собираются один раз, дальше правятся по событиям слежения — обходить заново
+   * десятки тысяч файлов на каждый запрос слишком дорого. `renamed` — что появилось, исчезло или переименовано
+   * с прошлого запроса: эти пути проверяются при следующем /files.
+   */
+  let fileIndex: { root: string; files: Set<string> } | null = null;
+  const renamed = new Set<string>();
   /** Что менялось снаружи за последние 30 секунд — в журнал, если изменений много (кто-то пишет в папку без остановки). */
   const changeCounts = new Map<string, number>();
   setInterval(() => {
@@ -263,7 +266,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
         if (IGNORE.test(p)) return;
         // Список файлов меняется, только когда файл появился, исчез или переименован ('rename');
         // запись в существующий файл ('change' — например, видео, которое кто-то рендерит в папку) его не меняет.
-        if (event === 'rename') filesGen++;
+        if (event === 'rename') renamed.add(p);
         const own = ownWrites.get(p);
         if (own && Date.now() - own < 3000) return;
         changeCounts.set(p, (changeCounts.get(p) ?? 0) + 1);
@@ -279,6 +282,31 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     } catch {
       watcher = null;
     }
+  }
+
+  /** Файлы базы: из списка, поправленного по событиям слежения; без слежения за папкой — обходом каждый раз. */
+  async function currentFiles(absRoot: string): Promise<Set<string>> {
+    if (!watcher || watchedRoot !== absRoot) return new Set(await listVaultFiles(absRoot));
+    if (fileIndex?.root !== absRoot) {
+      renamed.clear();
+      fileIndex = { root: absRoot, files: new Set(await listVaultFiles(absRoot)) };
+      return fileIndex.files;
+    }
+    const files = fileIndex.files;
+    const changed = [...renamed];
+    renamed.clear();
+    for (const p of changed) {
+      const st = await fs.stat(path.join(absRoot, p)).catch(() => null);
+      // Исчез (или переименован отсюда): сам путь и всё, что было внутри, если это была папка.
+      if (!st) {
+        files.delete(p);
+        const inner = `${p}/`;
+        for (const f of files) if (f.startsWith(inner)) files.delete(f);
+      } else if (st.isFile()) files.add(p);
+      // Появилась папка (переименовали или скопировали целиком) — её файлы.
+      else if (st.isDirectory()) for (const f of await listVaultFiles(absRoot, p)) files.add(f);
+    }
+    return files;
   }
 
   /** Что поменялось после номера `since`. Номер из будущего или слишком старый — вкладке надо перечитать всё. */
@@ -755,15 +783,8 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     }
 
     if (req.method === 'GET' && url.pathname === '/files') {
-      // Все заметки и файлы базы — для поиска (Ctrl+K) и для [[вики-ссылок]].
-      // Папка не менялась с прошлого обхода — тот же список (без слежения за папкой — обходим каждый раз).
-      const watching = !!watcher && watchedRoot === absRoot;
-      if (watching && filesCache?.root === absRoot && filesCache.gen === filesGen) return sendJson(res, 200, { files: filesCache.files });
-      const gen = filesGen;
-      const files = [];
-      for await (const f of walkVault(absRoot, () => true)) files.push({ path: f.rel, size: f.size, mtime: f.mtime });
-      if (watching && gen === filesGen) filesCache = { root: absRoot, gen, files };
-      return sendJson(res, 200, { files });
+      // Все заметки и файлы базы — для поиска (Ctrl+K) и для [[вики-ссылок]]. Размеры и даты вкладке не нужны.
+      return sendJson(res, 200, { files: [...(await currentFiles(absRoot))].map((p) => ({ path: p, size: 0, mtime: 0 })) });
     }
 
     if (req.method === 'PUT' && url.pathname === '/doc') {

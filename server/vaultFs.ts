@@ -22,6 +22,32 @@ export function toAbsolute(root: string, rel: string): string {
   return abs;
 }
 
+/**
+ * Пути всех файлов базы (или её подпапки `sub`) — без размеров и дат: только имена, поэтому быстро даже на десятках
+ * тысяч файлов. Скрытое (`.obsidian`, `.git` и прочие) и node_modules пропускаются, как в walkVault.
+ */
+export async function listVaultFiles(root: string, sub = ''): Promise<string[]> {
+  const absRoot = path.resolve(root);
+  const out: string[] = [];
+  const stack: string[] = [sub];
+  while (stack.length) {
+    const relDir = stack.pop()!;
+    let entries;
+    try {
+      entries = await fs.readdir(path.join(absRoot, relDir), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+      const rel = relDir ? `${relDir}/${e.name}` : e.name;
+      if (e.isDirectory()) stack.push(rel);
+      else if (e.isFile()) out.push(rel);
+    }
+  }
+  return out;
+}
+
 /** Обходит базу, пропуская служебные папки (`.obsidian`, `.trash`, `.git` и прочие скрытые). */
 export async function* walkVault(root: string, filter: (rel: string) => boolean): AsyncGenerator<VaultFile> {
   const absRoot = path.resolve(root);

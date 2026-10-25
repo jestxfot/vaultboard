@@ -99,8 +99,19 @@ function restartWithUpdate(): void {
   void installUpdate(setQuitting);
 }
 
+// Рисовать без видеокарты (переключатель в меню трея) — выбирается только до запуска, поэтому переключение перезапускает.
+const softwareRender = readState().softwareRender === true;
+if (softwareRender) app.disableHardwareAcceleration();
 // Ноутбуки с двумя видеокартами: просим мощную (встроенная может не успевать за большой доской).
-app.commandLine.appendSwitch('force_high_performance_gpu');
+else app.commandLine.appendSwitch('force_high_performance_gpu');
+
+/** Переключить рисование видеокартой / процессором и перезапуститься. */
+function toggleSoftwareRender(): void {
+  writeState({ softwareRender: !softwareRender });
+  log(`рисование: переключаю на ${softwareRender ? 'видеокарту' : 'процессор'}, перезапуск`);
+  app.relaunch();
+  quit();
+}
 registerScheme();
 
 if (!app.requestSingleInstanceLock()) {
@@ -162,10 +173,11 @@ if (!app.requestSingleInstanceLock()) {
       return;
     }
     await clearCacheIfNewBuild();
+    log(`рисование: ${softwareRender ? 'процессором (видеокарта выключена в меню трея)' : 'видеокартой'}`);
     logGpu();
     watchLoad();
     setupWindows({ icon: iconFile, preload: path.join(app.getAppPath(), 'dist-electron', 'preload.cjs'), onRecentChanged: updateTrayMenu });
-    createTray(iconFile, { installUpdate: restartWithUpdate, quit });
+    createTray(iconFile, { installUpdate: restartWithUpdate, quit, softwareRender, toggleSoftwareRender });
     onTrayHint(() => trayBalloon('vaultboard работает в трее', 'Открыть — щелчок по значку. Выйти совсем — правой кнопкой → «Выйти».'));
     const file = boardArg(process.argv);
     if (file) await openBoardFile(file);
