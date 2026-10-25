@@ -1,6 +1,6 @@
 {
   "name": "vaultboard",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "Open-source Miro-like board over a local folder of files",
   "author": "jestxfot <87380272+jestxfot@users.noreply.github.com>",
