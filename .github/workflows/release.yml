@@ -1,10 +1,12 @@
 # Релиз: на тег vX.Y.Z (его ставит npm run release) собираем установщики на Windows и Linux
 # и выкладываем их в релиз GitHub — вместе с latest*.yml и .blockmap, по которым приложение обновляется само.
+# Запуск вручную (Actions → Релиз → Run workflow) только собирает, без релиза: проверить сборку и прогреть кэш.
 name: Релиз
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,6 +24,17 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Electron и инструменты electron-builder (NSIS, 7-Zip, AppImage, fpm) — не скачивать заново каждый раз.
+      # Ключ — package-lock.json: обновили Electron или electron-builder — кэш соберётся заново.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-${{ runner.os }}-
       - run: npm run check
       - run: npm test
       - run: npm run build
@@ -40,6 +53,8 @@ jobs:
 
   release:
     needs: build
+    # Релиз — только на тег; ручной запуск лишь собирает.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
