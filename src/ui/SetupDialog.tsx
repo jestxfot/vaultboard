@@ -3,6 +3,7 @@
 import { createSignal, For, Show } from 'solid-js';
 import { type Settings, type SetupInfo, vault } from '../io/vault.ts';
 import { FolderPicker } from './FolderPicker.tsx';
+import { chooseFolder } from '../io/desktop.ts';
 
 /** Имя папки и где она лежит — «FNAF» и «J:\obsidian». */
 function splitPath(p: string): { name: string; where: string } {
@@ -121,7 +122,20 @@ export function SetupDialog(props: {
                   );
                 }}
               </For>
-              <button class="setup-option ghost" onClick={() => setPicking(true)}>
+              <button
+                class="setup-option ghost"
+                onClick={() =>
+                  chooseFolder(
+                    root(),
+                    (p) => {
+                      setCustom(p);
+                      setRoot(p);
+                      setIsNew(false);
+                    },
+                    () => setPicking(true),
+                  )
+                }
+              >
                 <span class="so-icon">…</span>
                 <span class="so-text"><span class="so-name">Другая папка</span><span class="so-kind">Выбрать на диске или создать новую</span></span>
               </button>

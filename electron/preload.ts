@@ -1,5 +1,6 @@
-// Мост между страницей и настольным приложением: страница узнаёт о скачанном обновлении и может попросить поставить его.
-// Больше ничего страница через него не может — доступ к диску у неё, как и в браузере, только через сервер.
+// Мост между страницей и настольным приложением. Страница может только то, что здесь перечислено:
+// узнать об обновлении и поставить его, выбрать папку окном системы, открыть доску в своём окне, написать в журнал.
+// Прямого доступа к диску у неё нет — файлы, как и в браузере, только через сервер.
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('vaultboardDesktop', {
@@ -15,5 +16,17 @@ contextBridge.exposeInMainWorld('vaultboardDesktop', {
   /** Строка в журнал приложения. */
   log(text: string): void {
     ipcRenderer.send('log', String(text).slice(0, 500));
+  },
+  /** Выбрать папку окном системы; отмена — null. */
+  pickFolder(start?: string): Promise<string | null> {
+    return ipcRenderer.invoke('pick-folder', start ?? '');
+  },
+  /** Окно открывает доску (путь от корня). false — она уже открыта в другом окне, и приложение показало то окно. */
+  claimBoard(path: string): Promise<boolean> {
+    return ipcRenderer.invoke('claim-board', path);
+  },
+  /** Открыть доску (путь от корня) в отдельном окне. */
+  openInNewWindow(path: string): void {
+    ipcRenderer.send('open-in-new-window', path);
   },
 });

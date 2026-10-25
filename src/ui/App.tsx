@@ -899,9 +899,13 @@ export function App() {
     await mount(parseBoard(text), path, 'new', guest() ? `Доска автора ${guest()!.owner}` : 'Общая доска', started, live);
   }
 
-  async function openBoard(path: string) {
+  /** Открыть доску. false — не открылась (ошибка или она уже открыта в другом окне приложения). */
+  async function openBoard(path: string): Promise<boolean> {
     const started = performance.now();
     setBench(null);
+    // Настольное приложение: доска уже открыта в другом окне — приложение показывает то окно, вторую копию не открываем:
+    // правки двух окон спорили бы в одном файле.
+    if (desktop && !guest() && current() !== path && !(await desktop.claimBoard(path))) return false;
     try {
       if (guest() || shared().has(path)) {
         await openLive(path, started);
@@ -913,7 +917,7 @@ export function App() {
             // Не запомнится.
           }
         }
-        return;
+        return true;
       }
       if (path.toLowerCase().endsWith('.canvas')) {
         // Доска Obsidian открывается как наша копия — папкой рядом с ней: оригинал .canvas не трогаем.
@@ -938,8 +942,10 @@ export function App() {
       } catch {
         // Не запомнится — откроется черновик.
       }
+      return true;
     } catch (err) {
       setError((err as Error).message);
+      return false;
     }
   }
 
@@ -968,13 +974,13 @@ export function App() {
   }
 
   /** Доска «Черновик» — готовая доска, которая открывается, когда открыть больше нечего. Нет её — создаётся. */
-  async function openDraft() {
+  async function openDraft(): Promise<boolean> {
     const path = `${DRAFT_BOARD}/${BOARD_FILE}`;
     if (!boards().some((b) => b.path === path)) {
-      if (!(await makeBoard(DRAFT_BOARD))) return;
+      if (!(await makeBoard(DRAFT_BOARD))) return false;
       await refreshBoards();
     }
-    await openBoard(path);
+    return openBoard(path);
   }
 
   async function openBench(count: number, auto: boolean) {
@@ -1171,11 +1177,15 @@ export function App() {
       } catch {
         // Нет доступа к хранилищу браузера — начнём с черновика.
       }
-      if (last && boards().some((b) => b.path === last)) await openBoard(last);
-      else if (SITE && boards().length) await openBoard(boards()[0].path);
-      else if (!SITE && !setup()) await openDraft();
-      // Папка с досками ещё не выбрана (первая настройка) — до её выбора пустая доска, которая не сохраняется.
-      else await mount(emptyBoard(), null, 'new', 'Черновик (не сохраняется) — сначала выбери папку с досками', performance.now());
+      let shown = false;
+      if (last && boards().some((b) => b.path === last)) shown = await openBoard(last);
+      if (!shown && SITE && boards().length) shown = await openBoard(boards()[0].path);
+      if (!shown && !SITE && !setup()) shown = await openDraft();
+      // Папка с досками ещё не выбрана (первая настройка) или «Черновик» открыт в другом окне — пустая доска, которая не сохраняется.
+      if (!shown) {
+        const hint = setup() ? 'сначала выбери папку с досками' : 'создай или открой доску слева';
+        await mount(emptyBoard(), null, 'new', `Черновик (не сохраняется) — ${hint}`, performance.now());
+      }
     }
   });
 
@@ -1227,7 +1237,30 @@ export function App() {
         <div class="board-list">
           <For each={shownBoards()} fallback={<div class="empty">{filter() ? 'Ничего не нашлось' : 'Досок пока нет'}</div>}>
             {(b) => (
-              <button class="board" classList={{ active: current() === b.path }} onClick={() => openBoard(b.path)} title={b.path}>
+              <button
+                class="board"
+                classList={{ active: current() === b.path }}
+                // В настольном приложении Ctrl+щелчок и средняя кнопка — открыть доску в отдельном окне, правая — меню.
+                onClick={(e) => (desktop && (e.ctrlKey || e.metaKey) ? desktop.openInNewWindow(b.path) : void openBoard(b.path))}
+                onAuxClick={(e) => {
+                  if (!desktop || e.button !== 1) return;
+                  e.preventDefault();
+                  desktop.openInNewWindow(b.path);
+                }}
+                onContextMenu={(e) => {
+                  if (!desktop) return;
+                  e.preventDefault();
+                  setMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    items: [
+                      { label: 'Открыть', action: () => void openBoard(b.path) },
+                      { label: 'Открыть в новом окне', hint: 'Ctrl+щелчок', action: () => desktop?.openInNewWindow(b.path) },
+                    ],
+                  });
+                }}
+                title={b.path}
+              >
                 <span class="board-icon">{b.kind === 'canvas' ? '◇' : '▦'}</span>
                 <span class="board-name">{b.kind === 'board' ? boardTitleOf(b.path) : b.path.replace(/\.canvas$/i, '')}</span>
                 <Show when={b.kind === 'canvas'}><span class="kind">Obsidian</span></Show>

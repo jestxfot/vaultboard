@@ -3,6 +3,7 @@
 import { createSignal, onMount, Show } from 'solid-js';
 import { vault } from '../io/vault.ts';
 import { FolderPicker } from './FolderPicker.tsx';
+import { chooseFolder, foreignRoot } from '../io/desktop.ts';
 
 export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { author?: string }) => void }) {
   const [proxy, setProxy] = createSignal('');
@@ -80,11 +81,15 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
             <div class="step-head small">Папка с досками</div>
             <Show
               when={!fixedRoot()}
-              fallback={<div class="step-note">{fixedRoot()} — задана переменной VAULT_ROOT при запуске сервера.</div>}
+              fallback={
+                <div class="step-note">
+                  {fixedRoot()} — {foreignRoot ? 'папка этой доски: окно открыто для доски не из папки с досками' : 'задана переменной VAULT_ROOT при запуске сервера'}.
+                </div>
+              }
             >
               <div class="settings-row">
                 <span class="settings-path" title={root()}>{root() || 'не выбрана'}</span>
-                <button class="soft-btn" onClick={() => setPicking(true)}>Изменить…</button>
+                <button class="soft-btn" onClick={() => chooseFolder(root(), setRoot, () => setPicking(true))}>Изменить…</button>
               </div>
               <Show when={root() !== savedRoot()}>
                 <div class="step-note">После сохранения приложение откроется заново с досками из новой папки.</div>

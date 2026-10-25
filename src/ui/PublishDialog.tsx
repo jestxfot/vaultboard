@@ -3,6 +3,7 @@
 import { createMemo, createSignal, For, onMount, Show } from 'solid-js';
 import { type PublishPlan, type PublishResult, type SiteInfo, type SiteSuggestion, vault } from '../io/vault.ts';
 import { FolderPicker } from './FolderPicker.tsx';
+import { chooseFolder } from '../io/desktop.ts';
 
 const KIND_NAMES: Record<PublishPlan['files'][number]['kind'], string> = {
   board: 'доска', image: 'фото', doc: 'заметки', file: 'файлы', link: 'картинки ссылок', embed: 'вставки в заметках',
@@ -175,7 +176,7 @@ export function PublishDialog(props: { board: string; onClose: () => void; onDon
                     </button>
                   )}
                 </For>
-                <button class="site-option" onClick={() => setPicking(true)}>
+                <button class="site-option" onClick={() => chooseFolder(dir(), (p) => void pick(p), () => setPicking(true))}>
                   <span class="so-kind">📁</span>
                   <span class="so-text"><b>Другая папка…</b><small>выбрать самому</small></span>
                 </button>
