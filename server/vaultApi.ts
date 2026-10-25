@@ -171,8 +171,11 @@ async function readBody(req: IncomingMessage): Promise<string> {
 export interface VaultServer {
   /** Обработчик запросов /api/… (адрес уже без «/api»). */
   api: (req: IncomingMessage, res: ServerResponse) => void;
-  /** Запустить: папка программы (в ней собранное приложение dist — его копирует публикация) и порт. */
-  start: (opts: { projectDir: string; port: number }) => void;
+  /**
+   * Запустить: папка программы (в ней собранное приложение dist — его копирует публикация) и `listen` —
+   * порт на этом компьютере, куда туннель поведёт гостей. Настольное приложение открывает порт только по этой просьбе.
+   */
+  start: (opts: { projectDir: string; listen: () => Promise<number> }) => void;
   /** Перед выходом: дописать на диск правки общих досок и закрыть туннель для гостей. */
   shutdown: () => Promise<void>;
 }
@@ -185,7 +188,8 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
   const envRoot = fixedRoot ? path.resolve(fixedRoot) : null;
   /** Папка программы — задаётся при старте сервера. */
   let projectDir = process.cwd();
-  let servePort = 5180;
+  /** Порт для туннеля гостей — открывается по первой просьбе (см. start). */
+  let listen: () => Promise<number> = async () => 5180;
 
   // ---------- слежение за файлами папки с досками ----------
 
@@ -203,8 +207,27 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
   /** Свои записи: путь → когда. Событие по такому пути в ближайшие секунды — эхо, его пропускаем. */
   const ownWrites = new Map<string, number>();
   const changeWaiters = new Set<() => void>();
-  /** Не следим: служебные папки, история отмены, временные файлы записи. */
-  const IGNORE = /(^|\/)(\.git|\.obsidian|\.trash|\.vaultboard|node_modules)(\/|$)|\.история\.jsonl$|\.tmp-\d+-\d+$|\.vb-update$|(^|\/)\.upload-\d+-\d+$/;
+  /**
+   * Не следим за скрытым — всё, что начинается с точки (.obsidian, .git, .trash, история отмены, папки других программ:
+   * .stfolder Syncthing, .claude и прочие): их не показываем и в списке файлов. И за временными файлами — своими
+   * (запись через временный файл), Syncthing (~syncthing~…tmp) и Office (~$…). Иначе программы, которые всё время
+   * пишут в свои скрытые папки, заставляли бы вкладки перечитывать список файлов раз в секунду.
+   */
+  const IGNORE = /(^|\/)(\.|node_modules(\/|$)|~syncthing~|~\$)|\.tmp-\d+-\d+$|\.vb-update$|\.tmp$/i;
+  /** Список файлов базы (для /files): обходить всю папку заново, только когда в ней что-то поменялось. */
+  let filesCache: { root: string; gen: number; files: { path: string; size: number; mtime: number }[] } | null = null;
+  /** Растёт с каждым изменением в папке — список, собранный до изменения, уже не годится. */
+  let filesGen = 0;
+  /** Что менялось снаружи за последние 30 секунд — в журнал, если изменений много (кто-то пишет в папку без остановки). */
+  const changeCounts = new Map<string, number>();
+  setInterval(() => {
+    const total = [...changeCounts.values()].reduce((a, b) => a + b, 0);
+    if (total >= 20) {
+      const top = [...changeCounts].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([p, n]) => `${p} ×${n}`).join(', ');
+      logLine(`[изменения] снаружи за 30 с: ${total}; чаще всего: ${top}`);
+    }
+    changeCounts.clear();
+  }, 30_000).unref();
 
   const rel = (abs: string) => path.relative(watchedRoot, abs).split(path.sep).join('/');
 
@@ -238,8 +261,10 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
         if (!name) return;
         const p = String(name).split(path.sep).join('/');
         if (IGNORE.test(p)) return;
+        filesGen++;
         const own = ownWrites.get(p);
         if (own && Date.now() - own < 3000) return;
+        changeCounts.set(p, (changeCounts.get(p) ?? 0) + 1);
         pendingChanges.add(p);
         // Редактор пишет файл в несколько приёмов — собираем события за 150 мс в одно.
         if (!flushTimer) flushTimer = setTimeout(flushChanges, 150);
@@ -536,10 +561,10 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
         const body = JSON.parse((await readBody(req)) || '{}') as { action: 'start' | 'stop' | 'download' };
         if (body.action === 'stop') tunnel.stop();
         else if (body.action === 'download') {
-          void tunnel.download().then(() => tunnel.start(servePort)).catch((err: Error) => {
+          void tunnel.download().then(listen).then((port) => tunnel.start(port)).catch((err: Error) => {
             tunnel.state = { kind: 'error', message: `Не скачался cloudflared: ${err.message}` };
           });
-        } else void tunnel.start(servePort);
+        } else void tunnel.start(await listen());
         return sendJson(res, 200, { state: tunnel.state }), true;
       }
     }
@@ -729,8 +754,13 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
 
     if (req.method === 'GET' && url.pathname === '/files') {
       // Все заметки и файлы базы — для поиска (Ctrl+K) и для [[вики-ссылок]].
+      // Папка не менялась с прошлого обхода — тот же список (без слежения за папкой — обходим каждый раз).
+      const watching = !!watcher && watchedRoot === absRoot;
+      if (watching && filesCache?.root === absRoot && filesCache.gen === filesGen) return sendJson(res, 200, { files: filesCache.files });
+      const gen = filesGen;
       const files = [];
       for await (const f of walkVault(absRoot, () => true)) files.push({ path: f.rel, size: f.size, mtime: f.mtime });
+      if (watching && gen === filesGen) filesCache = { root: absRoot, gen, files };
       return sendJson(res, 200, { files });
     }
 
@@ -1012,7 +1042,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     api,
     start(opts) {
       projectDir = opts.projectDir;
-      servePort = opts.port;
+      listen = opts.listen;
     },
     async shutdown() {
       tunnel.stop();
@@ -1027,11 +1057,11 @@ export function vaultApi(fixedRoot?: string): Plugin {
   return {
     name: 'vaultboard-vault-api',
     configureServer(server) {
-      vault.start({ projectDir: server.config.root, port: server.config.server.port ?? 5173 });
+      vault.start({ projectDir: server.config.root, listen: async () => server.config.server.port ?? 5173 });
       server.middlewares.use('/api', vault.api);
     },
     configurePreviewServer(server) {
-      vault.start({ projectDir: server.config.root, port: server.config.preview.port ?? 5180 });
+      vault.start({ projectDir: server.config.root, listen: async () => server.config.preview.port ?? 5180 });
       server.middlewares.use('/api', vault.api);
     },
   };

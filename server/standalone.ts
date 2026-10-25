@@ -1,17 +1,27 @@
 // Сервер приложения: отдаёт собранное приложение (папка dist) и API (/api/…).
 // Без Vite и без node_modules — его вместе со всеми зависимостями собирают в один файл dist-server/server.mjs
-// (npm run build). Настольное приложение (electron/main.ts) запускает этот файл отдельным процессом.
+// (npm run build).
 //
-// Запуск без приложения: node dist-server/server.mjs [порт]. Слушает только этот компьютер (127.0.0.1).
+// Два режима:
+//   node dist-server/server.mjs [порт] — для браузера: слушает 127.0.0.1:порт (по умолчанию 5180).
+//   Из настольного приложения (electron/server.ts задаёт VAULTBOARD_PIPE) — слушает только свой канал
+//   (named pipe в Windows, unix-сокет в Linux), через который ходят окна приложения; порта нет вовсе,
+//   пока доску не откроют гостям: тогда для туннеля открывается порт на 127.0.0.1.
+//   Окно может показывать доску не из папки с досками — тогда в запросе заголовок x-vaultboard-root с её корнем,
+//   и для этого корня работает свой сервер. Заголовок принимается только из канала, от гостей — никогда.
 import http from 'node:http';
 import { createReadStream, promises as fs } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createVaultServer } from './vaultApi.ts';
+import { createVaultServer, type VaultServer } from './vaultApi.ts';
 
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = path.join(projectDir, 'dist');
 const port = Number(process.argv[2] ?? process.env.PORT ?? 5180);
+/** Канал настольного приложения; нет его — обычный режим с портом. */
+const pipe = process.env.VAULTBOARD_PIPE || null;
+const ROOT_HEADER = 'x-vaultboard-root';
 
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -27,9 +37,6 @@ const TYPES: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
 };
-
-const vault = createVaultServer(process.env.VAULT_ROOT || undefined);
-vault.start({ projectDir, port });
 
 /** Файл приложения из dist. Файлы с отпечатком в имени (assets/…) кэшируются навсегда, index.html — никогда. */
 async function serveStatic(pathname: string, res: http.ServerResponse): Promise<void> {
@@ -72,37 +79,74 @@ setInterval(() => {
   hits.clear();
 }, 30_000).unref();
 
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url ?? '/', 'http://localhost');
-  hits.set(url.pathname, (hits.get(url.pathname) ?? 0) + 1);
-  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
-    // API ждёт адрес без «/api» — так же, как в сервере разработки Vite.
-    req.url = req.url!.slice(4) || '/';
-    vault.api(req, res);
-    return;
-  }
-  serveStatic(url.pathname, res).catch(() => {
-    res.statusCode = 500;
-    res.end();
-  });
-});
+const servers: http.Server[] = [];
 
+/** Порт для туннеля гостей. В обычном режиме — тот, что уже слушаем; в приложении — открывается по первой просьбе. */
+let guestPort: Promise<number> | null = null;
+function listen(): Promise<number> {
+  if (!pipe) return Promise.resolve(port);
+  guestPort ??= new Promise((resolve, reject) => {
+    const tcp = http.createServer(handler(false));
+    servers.push(tcp);
+    tcp.once('error', reject);
+    tcp.listen(0, '127.0.0.1', () => {
+      const opened = (tcp.address() as AddressInfo).port;
+      console.log(`порт для гостей: ${opened}`);
+      resolve(opened);
+    });
+  });
+  return guestPort;
+}
+
+/** Свой сервер на каждый корень: папка с досками (ключ '') и папки досок, открытых не из неё. */
+const vaults = new Map<string, VaultServer>();
+function vaultFor(root: string): VaultServer {
+  let vault = vaults.get(root);
+  if (!vault) {
+    vault = createVaultServer(root || process.env.VAULT_ROOT || undefined);
+    vault.start({ projectDir, listen });
+    vaults.set(root, vault);
+  }
+  return vault;
+}
+vaultFor('');
+
+/** Обработчик запросов. `fromPipe` — запрос из окна приложения: ему можно назвать корень доски заголовком. */
+function handler(fromPipe: boolean): http.RequestListener {
+  return (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    hits.set(url.pathname, (hits.get(url.pathname) ?? 0) + 1);
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      const header = fromPipe ? req.headers[ROOT_HEADER] : undefined;
+      const root = typeof header === 'string' && header ? path.resolve(decodeURIComponent(header)) : '';
+      // API ждёт адрес без «/api» — так же, как в сервере разработки Vite.
+      req.url = req.url!.slice(4) || '/';
+      vaultFor(root).api(req, res);
+      return;
+    }
+    serveStatic(url.pathname, res).catch(() => {
+      res.statusCode = 500;
+      res.end();
+    });
+  };
+}
+
+const server = http.createServer(handler(!!pipe));
+servers.push(server);
 server.on('error', (err: NodeJS.ErrnoException) => {
-  console.error(err.code === 'EADDRINUSE' ? `Порт ${port} занят — vaultboard уже запущен?` : err.message);
+  console.error(err.code === 'EADDRINUSE' ? (pipe ? `Канал ${pipe} занят` : `Порт ${port} занят — vaultboard уже запущен?`) : err.message);
   process.exit(1);
 });
-
-server.listen(port, '127.0.0.1', () => {
-  console.log(`vaultboard: http://localhost:${port}/`);
-});
+if (pipe) server.listen(pipe, () => console.log(`vaultboard: канал ${pipe}`));
+else server.listen(port, '127.0.0.1', () => console.log(`vaultboard: http://localhost:${port}/`));
 
 /** Выход: сохранить то, что ещё не на диске, и завершиться. Повторная просьба во время выхода ничего не меняет. */
 let quitting = false;
 async function quit(): Promise<void> {
   if (quitting) return;
   quitting = true;
-  server.close();
-  await vault.shutdown().catch((err: unknown) => console.error(err));
+  for (const s of servers) s.close();
+  await Promise.all([...vaults.values()].map((v) => v.shutdown().catch((err: unknown) => console.error(err))));
   process.exit(0);
 }
 process.on('SIGINT', () => void quit());
