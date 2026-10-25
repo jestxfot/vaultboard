@@ -216,7 +216,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
   const IGNORE = /(^|\/)(\.|node_modules(\/|$)|~syncthing~|~\$)|\.tmp-\d+-\d+$|\.vb-update$|\.tmp$/i;
   /** Список файлов базы (для /files): обходить всю папку заново, только когда в ней что-то поменялось. */
   let filesCache: { root: string; gen: number; files: { path: string; size: number; mtime: number }[] } | null = null;
-  /** Растёт с каждым изменением в папке — список, собранный до изменения, уже не годится. */
+  /** Растёт, когда в папке появился, исчез или переименован файл — список, собранный раньше, уже не годится. */
   let filesGen = 0;
   /** Что менялось снаружи за последние 30 секунд — в журнал, если изменений много (кто-то пишет в папку без остановки). */
   const changeCounts = new Map<string, number>();
@@ -257,11 +257,13 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     watcher = null;
     watchedRoot = root;
     try {
-      watcher = fsWatch(root, { recursive: true }, (_event, name) => {
+      watcher = fsWatch(root, { recursive: true }, (event, name) => {
         if (!name) return;
         const p = String(name).split(path.sep).join('/');
         if (IGNORE.test(p)) return;
-        filesGen++;
+        // Список файлов меняется, только когда файл появился, исчез или переименован ('rename');
+        // запись в существующий файл ('change' — например, видео, которое кто-то рендерит в папку) его не меняет.
+        if (event === 'rename') filesGen++;
         const own = ownWrites.get(p);
         if (own && Date.now() - own < 3000) return;
         changeCounts.set(p, (changeCounts.get(p) ?? 0) + 1);
