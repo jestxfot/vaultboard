@@ -201,8 +201,9 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
   let watcher: FSWatcher | null = null;
   let watchedRoot = '';
   let changeSeq = 0;
-  const changeLog: { seq: number; path: string }[] = [];
-  const pendingChanges = new Set<string>();
+  /** `listed` — файл появился, исчез или переименован (а не просто переписан): список файлов у вкладок устарел. */
+  const changeLog: { seq: number; path: string; listed: boolean }[] = [];
+  const pendingChanges = new Map<string, boolean>();
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** Свои записи: путь → когда. Событие по такому пути в ближайшие секунды — эхо, его пропускаем. */
   const ownWrites = new Map<string, number>();
@@ -243,8 +244,8 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
 
   function flushChanges(): void {
     flushTimer = null;
-    for (const p of pendingChanges) {
-      changeLog.push({ seq: ++changeSeq, path: p });
+    for (const [p, listed] of pendingChanges) {
+      changeLog.push({ seq: ++changeSeq, path: p, listed });
       // Общую доску поменяли снаружи (git, другая программа) — сервер перечитывает её и раздаёт участникам.
       if (hub.isLive(p)) void hub.reloadFromDisk(p);
     }
@@ -270,7 +271,7 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
         const own = ownWrites.get(p);
         if (own && Date.now() - own < 3000) return;
         changeCounts.set(p, (changeCounts.get(p) ?? 0) + 1);
-        pendingChanges.add(p);
+        pendingChanges.set(p, pendingChanges.get(p) === true || event === 'rename');
         // Редактор пишет файл в несколько приёмов — собираем события за 150 мс в одно.
         if (!flushTimer) flushTimer = setTimeout(flushChanges, 150);
       });
@@ -310,11 +311,13 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
   }
 
   /** Что поменялось после номера `since`. Номер из будущего или слишком старый — вкладке надо перечитать всё. */
-  function changesSince(since: number): { seq: number; paths: string[]; reset?: boolean } {
+  /** `files` — среди изменений есть появившиеся, исчезнувшие или переименованные файлы: вкладке пора обновить список файлов. */
+  function changesSince(since: number): { seq: number; paths: string[]; files?: boolean; reset?: boolean } {
     if (since < 0) return { seq: changeSeq, paths: [] };
     const oldest = changeLog[0]?.seq ?? changeSeq + 1;
     if (since > changeSeq || (since < oldest - 1 && changeLog.length)) return { seq: changeSeq, paths: [], reset: true };
-    return { seq: changeSeq, paths: [...new Set(changeLog.filter((c) => c.seq > since).map((c) => c.path))] };
+    const fresh = changeLog.filter((c) => c.seq > since);
+    return { seq: changeSeq, paths: [...new Set(fresh.map((c) => c.path))], files: fresh.some((c) => c.listed) };
   }
 
   async function currentRoot(): Promise<string | null> {

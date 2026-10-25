@@ -506,7 +506,7 @@ export function App() {
   }
 
   /** Применить то, что поменялось в папке снаружи. */
-  async function applyOutsideChanges(paths: string[], reset: boolean) {
+  async function applyOutsideChanges(paths: string[], reset: boolean, filesChanged: boolean) {
     if (reset) {
       await docs.revalidate();
       refreshFilesSoon();
@@ -517,7 +517,9 @@ export function App() {
     }
     // Заметки, которые показаны на досках или открыты в панели, — перечитать (панель обновится, если в ней нет правок).
     for (const p of paths) if (/\.md$/i.test(p) && docs.get(p)) void docs.load(p);
-    refreshFilesSoon();
+    // Список файлов (для поиска и [[ссылок]]) — только если файлы появились или исчезли: в большой папке он весит мегабайты,
+    // а программа, которая пишет в папку без остановки (рендер видео), иначе заставляла бы качать его каждую секунду.
+    if (filesChanged) refreshFilesSoon();
     if (paths.some((p) => /\.(board|canvas)$/i.test(p))) void refreshBoards().catch(() => undefined);
     const cur = opened?.session?.path;
     if (cur && paths.includes(cur)) await boardChangedOutside(cur);
@@ -529,7 +531,7 @@ export function App() {
     for (;;) {
       try {
         const r = await vault.changesWait(since);
-        if (since >= 0 && (r.paths.length || r.reset)) await applyOutsideChanges(r.paths, !!r.reset);
+        if (since >= 0 && (r.paths.length || r.reset)) await applyOutsideChanges(r.paths, !!r.reset, !!r.files);
         since = r.seq;
       } catch {
         // Сервер перезапускается или папка ещё не выбрана — подождать и спросить снова.

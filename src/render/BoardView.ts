@@ -250,7 +250,7 @@ export class BoardView {
    * Так видеокарте почти нечего делать за кадр — даже когда её занимает другая программа. Камера остановилась
    * или доска поменялась — снова рисуется сама доска, в полной чёткости.
    */
-  private scene: { rt: RenderTexture; cam: Camera; mw: number; mh: number; w: number; h: number } | null = null;
+  private scene: { rt: RenderTexture; cam: Camera; mw: number; mh: number; w: number; h: number; maxZoom: number } | null = null;
   private readonly sceneSprite = new Sprite();
   /** На доске что-то поменялось после снимка — снимок не годится. */
   private contentDirty = true;
@@ -1059,9 +1059,9 @@ export class BoardView {
     const zooming = this.cam.zoom !== this.lastFrameZoom;
     this.lastFrameZoom = this.cam.zoom;
     if (this.contentDirty || !this.sceneCovers()) {
-      // Масштаб меняется прямо сейчас (колесо, жест) — новый снимок устарел бы уже к следующему кадру:
-      // рисуем саму доску. Снимок пригодится для следующей панорамы на постоянном масштабе.
-      if (zooming || !this.captureScene()) {
+      // Масштаб меняется прямо сейчас (колесо, жест) — снимок шире и чуть мельче, с запасом на несколько щелчков
+      // колеса в обе стороны, как в картах: пока крутят колесо, доска чуть мягче, после остановки — снова чёткая.
+      if (!this.captureScene(zooming ? SCENE_ZOOM : 1)) {
         this.showWorld();
         return false;
       }
@@ -1084,7 +1084,7 @@ export class BoardView {
     const { w, h } = this.screen;
     if (!s || s.w !== w || s.h !== h) return false;
     const k = this.cam.zoom / s.cam.zoom;
-    if (k > SCENE_ZOOM || k < 1 / SCENE_ZOOM) return false;
+    if (k > s.maxZoom || k < 1 / SCENE_ZOOM) return false;
     // Снятая область и экран — в координатах доски.
     const sx0 = (-s.cam.x - s.mw) / s.cam.zoom, sy0 = (-s.cam.y - s.mh) / s.cam.zoom;
     const sx1 = sx0 + (w + 2 * s.mw) / s.cam.zoom, sy1 = sy0 + (h + 2 * s.mh) / s.cam.zoom;
@@ -1092,8 +1092,11 @@ export class BoardView {
     return vx0 >= sx0 && vy0 >= sy0 && vx0 + w / this.cam.zoom <= sx1 && vy0 + h / this.cam.zoom <= sy1;
   }
 
-  /** Нарисовать доску в текстуру снимка: экран и запас вокруг. false — такая текстура не влезает в видеокарту. */
-  private captureScene(): boolean {
+  /**
+   * Нарисовать доску в текстуру снимка: экран и запас вокруг. `zoomOut` > 1 — снимок мельче во столько раз
+   * (и во столько же раз шире по доске): для зума колесом. false — такая текстура не влезает в видеокарту.
+   */
+  private captureScene(zoomOut = 1): boolean {
     const { w, h } = this.screen;
     const res = this.app.renderer.resolution;
     // Запас поменьше, если экран большой, а видеокарта не берёт таких больших текстур.
@@ -1107,16 +1110,20 @@ export class BoardView {
       rt?.destroy(true);
       rt = RenderTexture.create({ width, height, resolution: res, antialias: true });
     }
-    const cam = { ...this.cam };
+    // Камера снимка: тот же центр экрана, масштаб меньше в zoomOut раз.
+    const zoom = this.cam.zoom / zoomOut;
+    const cx = (w / 2 - this.cam.x) / this.cam.zoom, cy = (h / 2 - this.cam.y) / this.cam.zoom;
+    const cam = { x: w / 2 - cx * zoom, y: h / 2 - cy * zoom, zoom };
     // В снимок попадает всё, что в снятой области, а не только на экране.
     this.updateVisible({ x: (-cam.x - mw) / cam.zoom, y: (-cam.y - mh) / cam.zoom, w: width / cam.zoom, h: height / cam.zoom });
     this.world.visible = true;
     this.world.scale.set(cam.zoom);
     this.world.position.set(cam.x + mw, cam.y + mh);
     this.app.renderer.render({ container: this.world, target: rt, clear: true, clearColor: [0, 0, 0, 0] });
-    this.world.position.set(cam.x, cam.y);
+    this.world.scale.set(this.cam.zoom);
+    this.world.position.set(this.cam.x, this.cam.y);
     this.sceneSprite.texture = rt;
-    this.scene = { rt, cam, mw, mh, w, h };
+    this.scene = { rt, cam, mw, mh, w, h, maxZoom: SCENE_ZOOM * zoomOut };
     return true;
   }
 

@@ -195,7 +195,7 @@ const serverVault = {
    * `since` = −1 — только узнать текущий номер. `reset` — изменений было слишком много или сервер перезапустился:
    * перечитать всё.
    */
-  changesWait: (since: number) => request<{ seq: number; paths: string[]; reset?: boolean }>(`/api/changes/wait?since=${since}`),
+  changesWait: (since: number) => request<{ seq: number; paths: string[]; files?: boolean; reset?: boolean }>(`/api/changes/wait?since=${since}`),
 
   /** Первая настройка: выбрана ли папка с досками и что предложить. */
   setup: () => request<SetupInfo>('/api/setup'),
