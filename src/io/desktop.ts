@@ -4,6 +4,8 @@ export interface DesktopBridge {
   onUpdateReady(cb: (update: { version: string }) => void): void;
   /** Перезапустить приложение с новой версией. */
   installUpdate(): void;
+  /** Строка в журнал приложения (%TEMP%\\vaultboard.log). */
+  log(text: string): void;
 }
 
 export const desktop: DesktopBridge | null = (window as unknown as { vaultboardDesktop?: DesktopBridge }).vaultboardDesktop ?? null;

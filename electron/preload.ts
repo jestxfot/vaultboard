@@ -12,4 +12,8 @@ contextBridge.exposeInMainWorld('vaultboardDesktop', {
   installUpdate(): void {
     ipcRenderer.send('update-install');
   },
+  /** Строка в журнал приложения. */
+  log(text: string): void {
+    ipcRenderer.send('log', String(text).slice(0, 500));
+  },
 });

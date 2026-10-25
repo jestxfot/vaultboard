@@ -1004,6 +1004,21 @@ export function App() {
   onMount(async () => {
     const v = await BoardView.create(host, perf);
     v.setDefaultBackground(BOARD_BACKGROUND[theme()]);
+    const bridge = desktop;
+    if (bridge) {
+      // Журнал настольного приложения: чем рисуем и как идут кадры, пока доску двигают (раз в 2 секунды, только в движении).
+      bridge.log(`видеокарта: ${v.describeGpu()}`);
+      const perfLog = setInterval(() => {
+        const s = perf.snapshot();
+        if (s.fps === null) return;
+        const ms = (x: number | null) => (x === null ? '—' : x.toFixed(1));
+        bridge.log(
+          `кадры: ${s.fps.toFixed(0)}/с, худший ${s.worstFrame.toFixed(0)} мс, процессор ${ms(s.cpuAvg)} (макс ${ms(s.cpuMax)}) мс, ` +
+            `ввод→кадр ${ms(s.latencyAvg)} (макс ${ms(s.latencyMax)}) мс, видно ${v.stats.visible} из ${v.stats.total}`,
+        );
+      }, 2000);
+      onCleanup(() => clearInterval(perfLog));
+    }
     // «Как в системе»: Windows переключилась на тёмную — и приложение за ней.
     onCleanup(onSystemTheme(() => {
       if (themeChoice() === 'system') setTheme('system');

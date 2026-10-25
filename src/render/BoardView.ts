@@ -256,6 +256,8 @@ export class BoardView {
       resolution: window.devicePixelRatio,
       background: '#f7f7f5',
       preference: 'webgl',
+      // На ноутбуках с двумя видеокартами — просить мощную: на встроенной большая доска двигается рывками.
+      powerPreference: 'high-performance',
     });
     // Ввод обрабатываем сами, система событий Pixi не нужна: она обходила бы тысячи объектов.
     this.app.stage.eventMode = 'none';
@@ -291,6 +293,20 @@ export class BoardView {
       this.requestFrame();
     });
     this.resizeObserver.observe(this.host);
+  }
+
+  /** Чем рисуем: видеокарта (как её называет WebGL), плотность пикселей и размер холста — для журнала. */
+  describeGpu(): string {
+    const canvas = this.app.canvas;
+    let gpu = 'не WebGL';
+    try {
+      const gl = (this.app.renderer as unknown as { gl?: WebGL2RenderingContext }).gl;
+      const info = gl?.getExtension('WEBGL_debug_renderer_info');
+      if (gl) gpu = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    } catch {
+      // Не узнали — так и запишем.
+    }
+    return `${gpu} · плотность ${window.devicePixelRatio} · холст ${canvas.width}×${canvas.height}`;
   }
 
   get screen(): { w: number; h: number } {

@@ -43,6 +43,10 @@ let serverStopped = false;
 /** Скачанная новая версия: поставится при выходе или по кнопке «Перезапустить». */
 let readyVersion: string | null = null;
 
+// Ноутбуки с двумя видеокартами: Windows по умолчанию даёт новой программе встроенную (медленную),
+// и большая доска двигается рывками. Просим мощную — так же, как её получает браузер.
+app.commandLine.appendSwitch('force_high_performance_gpu');
+
 /** Адрес окна. Именно localhost: с адреса-цифр (127.0.0.1) страница сама уходит на localhost — из-за YouTube. */
 const origin = () => `http://localhost:${port}`;
 
@@ -202,6 +206,20 @@ function stopServer(): Promise<void> {
     });
     child.postMessage('quit');
   });
+}
+
+/** Что Chromium думает о видеокарте: включено ли ускорение и какое устройство. Для разбора «тормозит». */
+function logGpu(): void {
+  const status = app.getGPUFeatureStatus() as unknown as Record<string, string>;
+  log(`ускорение: webgl ${status.webgl}, webgl2 ${status.webgl2}, композитинг ${status.gpu_compositing}, растр ${status.rasterization}`);
+  void app.getGPUInfo('basic').then(
+    (info) => {
+      const devices = (info as { gpuDevice?: { vendorId: number; deviceId: number; active: boolean; driverVersion?: string }[] }).gpuDevice ?? [];
+      const hex = (n: number) => n.toString(16).padStart(4, '0');
+      log(`видеокарты: ${devices.map((d) => `${hex(d.vendorId)}:${hex(d.deviceId)}${d.active ? ' (работает)' : ''}${d.driverVersion ? ` драйвер ${d.driverVersion}` : ''}`).join(', ') || 'нет данных'}`);
+    },
+    (err: Error) => log(`видеокарты: не узнать (${err.message})`),
+  );
 }
 
 // ---------- обновления ----------
@@ -435,6 +453,7 @@ if (!app.requestSingleInstanceLock()) {
     if (readyVersion) e.sender.send('update-ready', { version: readyVersion });
   });
   ipcMain.on('update-install', () => void installUpdate());
+  ipcMain.on('log', (_e, text: unknown) => log(`окно: ${String(text).slice(0, 500)}`));
 
   app.on('before-quit', (e) => {
     quitting = true;
@@ -462,6 +481,7 @@ if (!app.requestSingleInstanceLock()) {
       return;
     }
     await clearCacheIfNewBuild();
+    logGpu();
     createTray();
     createWindow(await urlForBoard(boardArg(process.argv)));
     watchUpdates();
