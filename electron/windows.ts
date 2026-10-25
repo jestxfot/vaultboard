@@ -146,6 +146,11 @@ export async function openMain(): Promise<void> {
   createWindow(`${SCHEME}://${MAIN_HOST}/`);
 }
 
+/** Замер скорости в отдельном окне: сгенерированные доски, итог — в журнал (см. runBenchSuite в App.tsx). */
+export function openBenchmark(): void {
+  createWindow(`${SCHEME}://${MAIN_HOST}/?bench=suite`);
+}
+
 /** Открыть файл доски: уже открыт — показать его окно, иначе — новое окно с ним. */
 export async function openBoardFile(file: string): Promise<void> {
   if (!BOARD_FILE.test(file) || !existsSync(file) || !statSync(file).isFile()) {

@@ -2,7 +2,7 @@
 import { app, Menu, nativeImage, Tray } from 'electron';
 import path from 'node:path';
 import { checkForUpdates, readyVersion } from './updates.ts';
-import { openBoardDialog, openBoardFile, recentBoards, showWindow } from './windows.ts';
+import { openBenchmark, openBoardDialog, openBoardFile, recentBoards, showWindow } from './windows.ts';
 
 let tray: Tray | null = null;
 let actions = { installUpdate: () => {}, quit: () => {}, softwareRender: false, toggleSoftwareRender: () => {} };
@@ -26,6 +26,7 @@ export function updateTrayMenu(): void {
       },
       { label: 'Открыть доску…', click: () => void openBoardDialog() },
       { type: 'separator' },
+      { label: 'Замер скорости', toolTip: 'Сгенерированные доски на 300 и 2000 объектов; итог — в журнале. Ваши доски не трогает.', click: openBenchmark },
       {
         label: 'Рисовать без видеокарты',
         toolTip: 'Если видеокарту занимает другая программа (например, нейросеть) и доска двигается рывками. Перезапускает vaultboard.',

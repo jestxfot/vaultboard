@@ -996,6 +996,39 @@ export function App() {
     console.table(results);
   }
 
+  /**
+   * Замер скорости для сравнения: доски на 300 и 2000 объектов, каждая — со снимком доски при движении камеры
+   * и без него (см. BoardView.scene). Итог — в журнал приложения (%TEMP%\\vaultboard.log) и в консоль.
+   * Доски замера генерируются и никуда не сохраняются.
+   */
+  async function runBenchSuite() {
+    history.replaceState(null, '', '?bench=suite');
+    const all: PhaseResult[] = [];
+    desktop?.log('замер скорости: начало');
+    for (const count of [300, 2000]) {
+      for (const cache of [true, false]) {
+        const mode = cache ? 'снимок' : 'без снимка';
+        await mount(generateBoard(count), null, 'new', `Замер: ${count} объектов, ${mode} (не сохраняется)`, performance.now());
+        const v = view()!;
+        v.sceneCache = cache;
+        setBench(null);
+        for (const r of await runAutopilot(v, setBenchPhase)) {
+          const row = { ...r, name: `${count}, ${mode}: ${r.name}` };
+          all.push(row);
+          desktop?.log(
+            `замер ${row.name} — ${r.fps.toFixed(0)} кадр/с, 95% кадров быстрее ${r.p95.toFixed(0)} мс, худший ${r.worst.toFixed(0)} мс, ` +
+              `процессор ${r.cpuAvg.toFixed(1)} мс, видно ${r.visibleAvg.toFixed(0)}`,
+          );
+        }
+      }
+    }
+    setBenchPhase('');
+    setBench(all);
+    (window as unknown as { __bench: unknown }).__bench = all;
+    console.table(all);
+    desktop?.log('замер скорости: готово');
+  }
+
   async function resolveConflict(keepMine: boolean) {
     if (!opened?.session) return;
     if (keepMine) await opened.session.overwrite();
@@ -1020,7 +1053,8 @@ export function App() {
         const ms = (x: number | null) => (x === null ? '—' : x.toFixed(1));
         bridge.log(
           `кадры: ${s.fps.toFixed(0)}/с, худший ${s.worstFrame.toFixed(0)} мс, процессор ${ms(s.cpuAvg)} (макс ${ms(s.cpuMax)}) мс, ` +
-            `ввод→кадр ${ms(s.latencyAvg)} (макс ${ms(s.latencyMax)}) мс, видно ${v.stats.visible} из ${v.stats.total}`,
+            `ввод→кадр ${ms(s.latencyAvg)} (макс ${ms(s.latencyMax)}) мс, видно ${v.stats.visible} из ${v.stats.total}, ` +
+            `из снимка ${v.stats.sceneFrames} кадров, снимков ${v.stats.sceneCaptures}`,
         );
       }, 2000);
       onCleanup(() => clearInterval(perfLog));
@@ -1167,7 +1201,8 @@ export function App() {
     if (!SITE) void watchOutsideChanges();
     const params = new URLSearchParams(location.search);
     if (!setup()) await refreshBoards().catch((err: Error) => setError(err.message));
-    if (params.get('bench')) await openBench(Number(params.get('bench')), params.get('auto') === '1');
+    if (params.get('bench') === 'suite') await runBenchSuite();
+    else if (params.get('bench')) await openBench(Number(params.get('bench')), params.get('auto') === '1');
     else if (params.get('open')) await openBoard(params.get('open')!);
     else {
       // Открыть доску, на которой остановились в прошлый раз (если она ещё есть).

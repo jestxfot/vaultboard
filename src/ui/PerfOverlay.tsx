@@ -27,6 +27,7 @@ export function PerfOverlay(props: { perf: PerfMonitor; view: BoardView }) {
       <div>
         объектов {stats().total} · видно {stats().visible} · вблизи {stats().near} · текстов {stats().labels}
         {stats().queued ? ` · в очереди ${stats().queued}` : ''}
+        {` · из снимка ${stats().sceneFrames} кадров, снимков ${stats().sceneCaptures}`}
       </div>
     </div>
   );

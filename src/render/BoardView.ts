@@ -89,6 +89,12 @@ const MIN_TEXT_PX = 5.5;
 const MAX_LABELS = 2500;
 const SETTLE_MS = 150;
 /**
+ * Снимок доски на время движения камеры (см. BoardView.scene): запас вокруг экрана с каждой стороны — доля экрана.
+ * Пока камера внутри снимка, а масштаб отличается от снимка не больше чем в SCENE_ZOOM раз, кадр — одна текстура.
+ */
+const SCENE_MARGIN = 0.35;
+const SCENE_ZOOM = 1.6;
+/**
  * Текст издалека не пропадает: пока объект виден вблизи, с него снимается маленькая картинка
  * (≈96 px по длинной стороне) со всем текстом и оформлением. Издалека показывается она —
  * для видеокарты это такой же дешёвый прямоугольник, только с текстурой.
@@ -147,6 +153,9 @@ export interface ViewStats {
   near: number;
   labels: number;
   queued: number;
+  /** Кадров из снимка доски и снимков (с начала работы) — видно, работает ли снимок при движении камеры. */
+  sceneFrames: number;
+  sceneCaptures: number;
 }
 
 type Task = () => void;
@@ -234,6 +243,25 @@ export class BoardView {
   private editingId: string | null = null;
   private raf = 0;
   private settleTimer = 0;
+  /**
+   * Снимок доски для движения камеры. Пока камеру двигают, а на доске ничего не меняется, доска не рисуется заново
+   * каждый кадр: она один раз рисуется в текстуру на видеокарте (с запасом вокруг экрана), и кадр — это одна эта
+   * текстура, сдвинутая и растянутая под камеру. Сетка и выделение рисуются как обычно, поверх.
+   * Так видеокарте почти нечего делать за кадр — даже когда её занимает другая программа. Камера остановилась
+   * или доска поменялась — снова рисуется сама доска, в полной чёткости.
+   */
+  private scene: { rt: RenderTexture; cam: Camera; mw: number; mh: number; w: number; h: number } | null = null;
+  private readonly sceneSprite = new Sprite();
+  /** На доске что-то поменялось после снимка — снимок не годится. */
+  private contentDirty = true;
+  /** Пользоваться снимком при движении камеры (замер скорости сравнивает со снимком и без). */
+  sceneCache = true;
+  /** Наибольшая сторона текстуры на этой видеокарте. */
+  private maxTexture = 4096;
+  private sceneFrames = 0;
+  private sceneCaptures = 0;
+  /** Масштаб прошлого кадра — меняется ли он сейчас (см. useScene). */
+  private lastFrameZoom = 0;
   private resizeObserver: ResizeObserver | null = null;
 
   private constructor(host: HTMLElement, perf: PerfMonitor) {
@@ -278,6 +306,7 @@ export class BoardView {
     } catch {
       // Не WebGL — оставим безопасное значение.
     }
+    this.maxTexture = maxTexture;
     this.images = new ImageCache(maxTexture);
     this.images.onLoaded = (file) => {
       for (const v of this.fileViews.get(file) ?? []) if (this.visible.has(v)) this.updateDetail(v);
@@ -285,7 +314,8 @@ export class BoardView {
     };
 
     this.grid = new TilingSprite({ texture: dotTexture(), width: 1, height: 1 });
-    this.app.stage.addChild(this.grid, this.gridLines, this.world, this.markerOverlay, this.overlay);
+    this.sceneSprite.visible = false;
+    this.app.stage.addChild(this.grid, this.gridLines, this.world, this.sceneSprite, this.markerOverlay, this.overlay);
 
     this.resizeObserver = new ResizeObserver(() => {
       this.app.resize();
@@ -325,6 +355,8 @@ export class BoardView {
       near: this.nearCount,
       labels: this.labelCount,
       queued: this.nearQueue.size + this.labelQueue.size + this.miscQueue.size,
+      sceneFrames: this.sceneFrames,
+      sceneCaptures: this.sceneCaptures,
     };
   }
 
@@ -825,7 +857,8 @@ export class BoardView {
 
   invalidateOverlay(): void {
     this.overlayDirty = true;
-    this.requestFrame();
+    // Выделение и ручки — отдельный слой поверх доски, в снимок доски не входят.
+    this.scheduleFrame();
   }
 
   /** Текст объекта, который сейчас редактируется, не рисуем — поверх него стоит поле ввода. */
@@ -959,14 +992,21 @@ export class BoardView {
   private cameraMoved(): void {
     this.moving = true;
     this.camDirty = true;
-    this.requestFrame();
+    this.scheduleFrame();
     clearTimeout(this.settleTimer);
     this.settleTimer = window.setTimeout(() => this.settle(), SETTLE_MS);
   }
 
   // ---------- кадр ----------
 
+  /** Перерисовать: на доске что-то поменялось (снимок для движения камеры больше не годится). */
   requestFrame(): void {
+    this.contentDirty = true;
+    this.scheduleFrame();
+  }
+
+  /** Кадр без изменений на доске: камера, движение мыши, слой выделения. Снимок для движения камеры остаётся годным. */
+  scheduleFrame(): void {
     if (!this.raf) this.raf = requestAnimationFrame(this.frame);
   }
 
@@ -987,10 +1027,13 @@ export class BoardView {
     this.driver?.(t);
     this.beforeFrame?.();
     const moved = this.camDirty;
+    // Камера движется, на доске ничего не поменялось — кадр из снимка (см. scene), доску не перерисовываем.
+    const cached = this.moving && this.sceneCache && !this.exportSaved && this.useScene();
+    if (!cached) this.showWorld();
     if (this.camDirty) {
       this.camDirty = false;
       this.applyCamera();
-      this.updateVisible();
+      if (!cached) this.updateVisible();
     }
     if (moved || this.overlayDirty) {
       this.overlayDirty = false;
@@ -999,12 +1042,89 @@ export class BoardView {
       this.markerOverlay.blendMode = this.markerBlend;
       this.overlayPainter?.(this.overlay, this.markerOverlay);
     }
-    this.runQueues(start + FRAME_BUDGET_MS);
+    // Отложенная работа меняет доску — пока кадры идут из снимка, она ждёт остановки камеры.
+    if (!cached && this.runQueues(start + FRAME_BUDGET_MS)) this.contentDirty = true;
     this.app.render();
     this.perf.frameDone(performance.now() - start);
     this.onCamera?.();
-    if (this.nearQueue.size || this.labelQueue.size || this.miscQueue.size || this.driver) this.requestFrame();
+    const queued = this.nearQueue.size || this.labelQueue.size || this.miscQueue.size;
+    if ((queued && !cached) || this.driver) this.scheduleFrame();
   };
+
+  /**
+   * Показать кадр из снимка: снять заново, если доска поменялась или камера ушла за снимок, и поставить его под камеру.
+   * false — снимок не получился (слишком большой экран для этой видеокарты): рисовать доску как обычно.
+   */
+  private useScene(): boolean {
+    const zooming = this.cam.zoom !== this.lastFrameZoom;
+    this.lastFrameZoom = this.cam.zoom;
+    if (this.contentDirty || !this.sceneCovers()) {
+      // Масштаб меняется прямо сейчас (колесо, жест) — новый снимок устарел бы уже к следующему кадру:
+      // рисуем саму доску. Снимок пригодится для следующей панорамы на постоянном масштабе.
+      if (zooming || !this.captureScene()) {
+        this.showWorld();
+        return false;
+      }
+      this.contentDirty = false;
+      this.sceneCaptures++;
+    }
+    this.sceneFrames++;
+    const s = this.scene!;
+    const k = this.cam.zoom / s.cam.zoom;
+    this.sceneSprite.scale.set(k);
+    this.sceneSprite.position.set(this.cam.x - (s.cam.x + s.mw) * k, this.cam.y - (s.cam.y + s.mh) * k);
+    this.world.visible = false;
+    this.sceneSprite.visible = true;
+    return true;
+  }
+
+  /** Снимок годится для нынешней камеры: экран внутри снятой области, масштаб почти тот же. */
+  private sceneCovers(): boolean {
+    const s = this.scene;
+    const { w, h } = this.screen;
+    if (!s || s.w !== w || s.h !== h) return false;
+    const k = this.cam.zoom / s.cam.zoom;
+    if (k > SCENE_ZOOM || k < 1 / SCENE_ZOOM) return false;
+    // Снятая область и экран — в координатах доски.
+    const sx0 = (-s.cam.x - s.mw) / s.cam.zoom, sy0 = (-s.cam.y - s.mh) / s.cam.zoom;
+    const sx1 = sx0 + (w + 2 * s.mw) / s.cam.zoom, sy1 = sy0 + (h + 2 * s.mh) / s.cam.zoom;
+    const vx0 = -this.cam.x / this.cam.zoom, vy0 = -this.cam.y / this.cam.zoom;
+    return vx0 >= sx0 && vy0 >= sy0 && vx0 + w / this.cam.zoom <= sx1 && vy0 + h / this.cam.zoom <= sy1;
+  }
+
+  /** Нарисовать доску в текстуру снимка: экран и запас вокруг. false — такая текстура не влезает в видеокарту. */
+  private captureScene(): boolean {
+    const { w, h } = this.screen;
+    const res = this.app.renderer.resolution;
+    // Запас поменьше, если экран большой, а видеокарта не берёт таких больших текстур.
+    const fit = Math.min((this.maxTexture / (w * res) - 1) / 2, (this.maxTexture / (h * res) - 1) / 2);
+    const margin = Math.min(SCENE_MARGIN, fit);
+    if (margin < 0.1 || w < 1 || h < 1) return false;
+    const mw = Math.round(w * margin), mh = Math.round(h * margin);
+    const width = w + 2 * mw, height = h + 2 * mh;
+    let rt = this.scene?.rt;
+    if (!rt || rt.width !== width || rt.height !== height || rt.source.resolution !== res) {
+      rt?.destroy(true);
+      rt = RenderTexture.create({ width, height, resolution: res, antialias: true });
+    }
+    const cam = { ...this.cam };
+    // В снимок попадает всё, что в снятой области, а не только на экране.
+    this.updateVisible({ x: (-cam.x - mw) / cam.zoom, y: (-cam.y - mh) / cam.zoom, w: width / cam.zoom, h: height / cam.zoom });
+    this.world.visible = true;
+    this.world.scale.set(cam.zoom);
+    this.world.position.set(cam.x + mw, cam.y + mh);
+    this.app.renderer.render({ container: this.world, target: rt, clear: true, clearColor: [0, 0, 0, 0] });
+    this.world.position.set(cam.x, cam.y);
+    this.sceneSprite.texture = rt;
+    this.scene = { rt, cam, mw, mh, w, h };
+    return true;
+  }
+
+  /** Рисовать саму доску (а не снимок). */
+  private showWorld(): void {
+    this.world.visible = true;
+    this.sceneSprite.visible = false;
+  }
 
   private applyCamera(): void {
     const { x, y, zoom } = this.cam;
@@ -1352,6 +1472,9 @@ export class BoardView {
   /** Камера остановилась: дорисовать тексты в нужном разрешении и освободить память от далёких. */
   private settle(): void {
     this.moving = false;
+    // Камера остановилась — снова рисуется сама доска, в полной чёткости и с подробностями под нынешний масштаб.
+    this.showWorld();
+    this.camDirty = true;
     this.updateFarLines();
     // Камера остановилась — теперь можно грузить оригиналы фото, которые видны крупно.
     const photosInUse = new Set<string>();
@@ -1419,7 +1542,9 @@ export class BoardView {
     this.requestFrame();
   }
 
-  private runQueues(deadline: number): void {
+  /** Сделать часть отложенной работы; true — что-то сделано (доска поменялась). */
+  private runQueues(deadline: number): boolean {
+    let done = 0;
     let n = 0;
     for (const [v, task] of this.nearQueue) {
       if (n >= NEAR_BUILDS_PER_FRAME || performance.now() > deadline) break;
@@ -1427,6 +1552,7 @@ export class BoardView {
       task();
       n++;
     }
+    done += n;
     n = 0;
     for (const [v, task] of this.labelQueue) {
       if (n >= LABELS_PER_FRAME || performance.now() > deadline) break;
@@ -1434,11 +1560,14 @@ export class BoardView {
       task();
       n++;
     }
+    done += n;
     for (const [key, task] of this.miscQueue) {
       if (performance.now() > deadline) break;
       this.miscQueue.delete(key);
       task();
+      done++;
     }
+    return done > 0;
   }
 
   // ---------- экспорт ----------
@@ -1507,6 +1636,7 @@ export class BoardView {
   }
 
   private async renderTileTexture(rect: Rect, scale: number, w: number, h: number): Promise<RenderTexture> {
+    this.showWorld();
     this.tileSaved = { ...this.cam };
     this.cam.zoom = scale;
     this.cam.x = -rect.x * scale;
@@ -1570,6 +1700,7 @@ export class BoardView {
   }
 
   destroy(): void {
+    this.scene?.rt.destroy(true);
     this.images.destroy();
     cancelAnimationFrame(this.raf);
     clearTimeout(this.settleTimer);

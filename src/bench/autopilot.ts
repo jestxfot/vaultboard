@@ -98,7 +98,7 @@ export async function runAutopilot(view: BoardView, onPhase?: (name: string) => 
           });
         }
       };
-      view.requestFrame();
+      view.scheduleFrame();
     });
     results.push(result);
   }

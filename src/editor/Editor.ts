@@ -527,7 +527,8 @@ export class Editor {
       this.view.invalidateOverlay();
     }
     this.pointerDirty = true;
-    this.view.requestFrame();
+    // Само движение мыши доску не меняет (меняет — через правки, они сами просят перерисовать доску).
+    this.view.scheduleFrame();
   }
 
   /** Раз в кадр применяем последнее положение мыши — сколько бы событий ни прислала мышь с частотой 1000 Гц. */
