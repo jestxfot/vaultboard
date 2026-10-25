@@ -58,8 +58,23 @@ async function serveStatic(pathname: string, res: http.ServerResponse): Promise<
   createReadStream(abs).pipe(res);
 }
 
+/** Какие запросы приходили за последние 30 секунд — чтобы по журналу понять, чем сервер занят. */
+const hits = new Map<string, number>();
+let lastCpu = process.cpuUsage();
+setInterval(() => {
+  const used = process.cpuUsage(lastCpu);
+  lastCpu = process.cpuUsage();
+  const percent = ((used.user + used.system) / 1000 / 30_000) * 100;
+  if (percent >= 10) {
+    const top = [...hits].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([p, n]) => `${p} ×${n}`).join(', ');
+    console.log(`сервер занят: ${percent.toFixed(0)}% процессора за 30 с; запросы: ${top || 'нет'}`);
+  }
+  hits.clear();
+}, 30_000).unref();
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
+  hits.set(url.pathname, (hits.get(url.pathname) ?? 0) + 1);
   if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
     // API ждёт адрес без «/api» — так же, как в сервере разработки Vite.
     req.url = req.url!.slice(4) || '/';

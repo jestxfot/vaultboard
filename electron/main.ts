@@ -222,6 +222,18 @@ function logGpu(): void {
   );
 }
 
+/** Раз в 30 секунд, если какой-то процесс приложения заметно занят: кто сколько ест процессора и памяти. */
+function watchLoad(): void {
+  app.getAppMetrics();
+  setInterval(() => {
+    const metrics = app.getAppMetrics();
+    if (!metrics.some((m) => m.cpu.percentCPUUsage >= 5)) return;
+    const describe = (m: Electron.ProcessMetric) =>
+      `${m.name || m.serviceName || m.type} ${m.cpu.percentCPUUsage.toFixed(0)}% ${Math.round(m.memory.workingSetSize / 1024)} МБ`;
+    log(`нагрузка: ${metrics.map(describe).join(', ')}`);
+  }, 30_000);
+}
+
 // ---------- обновления ----------
 
 /**
@@ -482,6 +494,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     await clearCacheIfNewBuild();
     logGpu();
+    watchLoad();
     createTray();
     createWindow(await urlForBoard(boardArg(process.argv)));
     watchUpdates();
