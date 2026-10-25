@@ -3,10 +3,9 @@
 // Что делает, по шагам — и останавливается на первой ошибке:
 //   1. Проверяет, что всё закоммичено, типы сходятся, тесты проходят и приложение собирается.
 //   2. Ставит новую версию в package.json и package-lock.json, коммитит «Релиз vX.Y.Z», ставит тег vX.Y.Z.
-//   3. Отправляет ветку и тег на GitHub и создаёт релиз (gh release create) с описанием из коммитов
-//      и готовой сборкой vaultboard.zip (scripts/pack.mjs): ей не нужны ни npm install, ни сборка.
-// После этого у всех, кто запускает vaultboard.vbs с включённым автообновлением, при следующем запуске
-// поставится эта версия (см. scripts/update.mjs).
+//   3. Отправляет ветку и тег на GitHub.
+// Дальше всё делает GitHub (.github/workflows/release.yml): собирает установщики на Windows и Linux
+// и выкладывает релиз — с latest*.yml и .blockmap, по которым установленные копии обновляются сами.
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -32,11 +31,6 @@ const tag = `v${next}`;
 
 if (out('git status --porcelain')) fail('Есть незакоммиченные правки — сначала закоммить их.');
 if (out(`git tag --list ${tag}`)) fail(`Тег ${tag} уже есть.`);
-try {
-  out('gh auth status');
-} catch {
-  fail('Нет входа в GitHub CLI: gh auth login');
-}
 
 console.log(`Релиз ${current} → ${tag}\n\nПроверяю типы и тесты…`);
 sh('npm run check');
@@ -44,39 +38,11 @@ sh('npm test');
 // Релиз, который не собирается, у людей не запустится — проверяем сборку до публикации.
 sh('npm run build');
 
-// Описание релиза — заголовки коммитов с прошлого релиза.
-const prev = out('git tag --list "v*" --sort=-v:refname').split('\n').filter(Boolean)[0];
-const log = out(`git log --pretty=format:"- %s" ${prev ? `${prev}..HEAD` : ''}`);
-const notes = `## Что нового\n\n${log || '- первый релиз'}\n\n**Установка:** скачай vaultboard.zip ниже, распакуй и дважды щёлкни vaultboard.vbs.\nУ кого vaultboard уже стоит — обновление поставится само.`;
-
 sh(`npm version ${next} --no-git-tag-version`, { stdio: 'ignore' });
-// Готовая сборка — уже с новым номером версии (по нему установки сверяют обновления).
-sh('npm run build', { stdio: 'ignore' });
-sh('npm run pack');
 sh('git add package.json package-lock.json');
 sh(`git commit -q -m "Релиз ${tag}"`);
 sh(`git tag -a ${tag} -m "Релиз ${tag}"`);
 sh('git push');
 sh(`git push origin ${tag}`);
-// Связь с GitHub иногда рвётся («unexpected EOF») — пробуем до трёх раз; если релиз успел создаться, второй не делаем.
-const exists = () => {
-  try {
-    out(`gh release view ${tag} --json tagName`);
-    return true;
-  } catch {
-    return false;
-  }
-};
-for (let attempt = 1; ; attempt++) {
-  try {
-    execSync(`gh release create ${tag} release/vaultboard.zip --title "vaultboard ${tag}" --notes-file -`, { cwd: dir, input: notes, stdio: ['pipe', 'inherit', 'inherit'] });
-    break;
-  } catch (err) {
-    if (exists()) break;
-    if (attempt >= 3) throw err;
-    console.log(`Создать релиз не вышло (попытка ${attempt}), пробую ещё раз…`);
-    // Пауза без внешних команд: `timeout` из Windows не работает без интерактивной консоли.
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
-  }
-}
-console.log(`\n✓ Релиз ${tag} опубликован: https://github.com/jestxfot/vaultboard/releases/tag/${tag}`);
+console.log(`\n✓ Тег ${tag} отправлен. GitHub соберёт установщики и выложит релиз за 10–15 минут:`);
+console.log('  https://github.com/jestxfot/vaultboard/actions');

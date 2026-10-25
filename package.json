@@ -3,20 +3,23 @@
   "version": "0.4.1",
   "private": true,
   "description": "Open-source Miro-like board over a local folder of files",
+  "author": "jestxfot <87380272+jestxfot@users.noreply.github.com>",
+  "homepage": "https://github.com/jestxfot/vaultboard",
   "license": "MIT",
   "type": "module",
+  "main": "dist-electron/main.cjs",
+  "desktopName": "vaultboard.desktop",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build -c vite.server.config.ts",
-    "stable": "npm run build && npm start",
+    "build": "vite build && vite build -c vite.server.config.ts && vite build -c vite.electron.config.ts && vite build -c vite.electron.config.ts --mode preload",
+    "app": "npm run build && electron .",
+    "dist": "npm run build && electron-builder",
     "check": "tsc --noEmit",
     "test": "node scripts/test-format.ts && node scripts/test-store.ts",
-    "update": "node scripts/update.mjs",
     "release": "node scripts/release.mjs",
-    "start": "node dist-server/server.mjs",
-    "pack": "node scripts/pack.mjs"
+    "start": "node dist-server/server.mjs"
   },
-  "dependencies": {
+  "devDependencies": {
     "@codemirror/commands": "^6.11.1",
     "@codemirror/lang-markdown": "^6.5.2",
     "@codemirror/language": "^6.12.4",
@@ -36,18 +39,19 @@
     "@fontsource/pt-serif": "^5.3.0",
     "@fontsource/roboto": "^5.3.0",
     "@lezer/highlight": "^1.2.4",
+    "@types/markdown-it": "^14.2.0",
+    "@types/node": "^26.6.3",
+    "@types/rbush": "^4.0.0",
+    "electron": "44.9.3",
+    "electron-builder": "26.17.0",
+    "electron-updater": "6.8.10",
     "fetch-socks": "^1.3.3",
     "markdown-it": "^15.0.2",
     "pixi.js": "^8.21.0",
     "rbush": "^4.0.1",
     "solid-js": "^1.9.15",
-    "undici": "^8.11.2"
-  },
-  "devDependencies": {
-    "@types/markdown-it": "^14.2.0",
-    "@types/node": "^26.6.3",
-    "@types/rbush": "^4.0.0",
     "typescript": "^7.0.2",
+    "undici": "^8.11.2",
     "vite": "^8.3.1",
     "vite-plugin-solid": "^2.11.14"
   }

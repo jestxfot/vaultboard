@@ -16,5 +16,5 @@
     "jsx": "preserve",
     "jsxImportSource": "solid-js"
   },
-  "include": ["src", "server", "scripts", "vite.config.ts"]
+  "include": ["src", "server", "electron", "scripts", "vite.config.ts"]
 }

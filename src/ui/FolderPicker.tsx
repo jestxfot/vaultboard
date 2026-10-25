@@ -2,6 +2,7 @@
 // Диски → папки → «Выбрать эту папку»; можно создать новую папку прямо здесь.
 import { createSignal, For, onMount, Show } from 'solid-js';
 import { type DirList, vault } from '../io/vault.ts';
+import { ask } from './ask.tsx';
 
 export function FolderPicker(props: { start?: string; onPick: (path: string) => void; onCancel: () => void }) {
   const [list, setList] = createSignal<DirList | null>(null);
@@ -28,7 +29,7 @@ export function FolderPicker(props: { start?: string; onPick: (path: string) => 
   const mkdir = async () => {
     const cur = list();
     if (!cur?.path) return;
-    const name = window.prompt('Название новой папки', 'vaultboard');
+    const name = await ask('Название новой папки', 'vaultboard');
     if (!name?.trim()) return;
     try {
       const made = await vault.mkdir(cur.path, name.trim());

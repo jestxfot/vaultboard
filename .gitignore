@@ -1,5 +1,5 @@
 node_modules/
 dist/
-.vaultboard-version.json
 dist-server/
+dist-electron/
 release/

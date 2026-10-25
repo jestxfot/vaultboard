@@ -1,0 +1,81 @@
+# Установщики настольного приложения: npm run dist (Windows — на Windows, Linux — на Linux).
+# Готовые файлы — в папке release/.
+appId: io.github.jestxfot.vaultboard
+productName: vaultboard
+copyright: Copyright © 2026 jestxfot
+
+directories:
+  output: release
+  buildResources: resources
+
+# В приложение — только собранное: страница (dist), сервер одним файлом (dist-server), главный процесс (dist-electron).
+files:
+  - dist/**
+  - dist-server/**
+  - dist-electron/**
+  - resources/icon.ico
+  - resources/icon.png
+  - package.json
+  - '!**/node_modules/**'
+
+# Сервер запускается отдельным процессом, а публикация копирует dist в папку сайта — им нужны обычные файлы, не архив asar.
+asarUnpack:
+  - dist/**
+  - dist-server/**
+
+# Обновления: установленное приложение спрашивает GitHub Releases о новой версии (latest.yml, latest-linux.yml)
+# и скачивает только изменившиеся части установщика (файлы .blockmap). Их кладёт в релиз npm run release.
+publish:
+  provider: github
+  owner: jestxfot
+  repo: vaultboard
+  releaseType: release
+
+fileAssociations:
+  - ext: board
+    name: vaultboard board
+    description: Доска vaultboard
+    mimeType: application/x-vaultboard
+    icon: icon
+    role: Editor
+
+win:
+  target:
+    - target: nsis
+      arch: x64
+  icon: resources/icon.ico
+  executableName: vaultboard
+
+# Установщик с шагами: лицензия, папка установки, ярлык на рабочем столе (галочка), «Запустить vaultboard» в конце.
+# Ставится для текущего пользователя (без прав администратора) — в %LOCALAPPDATA%\Programs\vaultboard.
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  license: LICENSE
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  shortcutName: vaultboard
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  include: resources/installer.nsh
+  # Интерфейс программы — на русском, установщик тоже.
+  installerLanguages: [ru_RU]
+  language: '1049'
+  multiLanguageInstaller: false
+  artifactName: vaultboard-setup-${version}.${ext}
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Office
+  icon: resources/icon.png
+  executableName: vaultboard
+  # Окно связывается со своим ярлыком в меню приложений (тот же app_id / WM_CLASS).
+  syncDesktopName: true
+  synopsis: Бесконечная доска поверх обычных файлов
+  description: Бесконечная доска в духе Miro, которая хранит всё обычными файлами на диске.
+  maintainer: jestxfot <87380272+jestxfot@users.noreply.github.com>
+  artifactName: vaultboard-${version}-${arch}.${ext}

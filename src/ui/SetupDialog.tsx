@@ -1,4 +1,4 @@
-// Первая настройка: где хранить доски, как тебя подписывать в комментариях, обновляться ли самому.
+// Первая настройка: где хранить доски и как тебя подписывать в комментариях.
 // Показывается, пока не выбрана папка с досками — например, на новом компьютере или без Obsidian.
 import { createSignal, For, Show } from 'solid-js';
 import { type Settings, type SetupInfo, vault } from '../io/vault.ts';
@@ -33,7 +33,6 @@ export function SetupDialog(props: {
   // Уже выбранная папка, которой нет среди предложенных, — показать её отдельной карточкой.
   const [custom, setCustom] = createSignal<string | null>(was && !props.info.suggestions.some((s) => s.path === was) ? was : null);
   const [author, setAuthor] = createSignal(props.current?.author || props.info.defaultAuthor);
-  const [autoUpdate, setAutoUpdate] = createSignal(props.current?.autoUpdate !== false);
   const [proxy, setProxy] = createSignal(props.current?.proxy ?? '');
   const [more, setMore] = createSignal(false);
   const [picking, setPicking] = createSignal(false);
@@ -55,7 +54,6 @@ export function SetupDialog(props: {
       await vault.putSettings({
         ...(props.info.fixed ? {} : { vaultRoot: root().trim(), createRoot: isNew() }),
         author: author().trim(),
-        autoUpdate: autoUpdate(),
         proxy: proxy().trim(),
       });
       props.onDone(!props.info.fixed && root().trim() !== (was ?? ''));
@@ -91,7 +89,7 @@ export function SetupDialog(props: {
             <span class="logo big">vb</span>
             <div>
               <div class="setup-title">{props.current ? 'Настройка vaultboard' : 'Добро пожаловать в vaultboard'}</div>
-              <div class="setup-sub">{props.current ? 'Папка с досками, имя и обновления — то же, что при первом запуске.' : 'Бесконечные доски поверх обычных файлов. Три вопроса — и можно работать.'}</div>
+              <div class="setup-sub">{props.current ? 'Папка с досками и имя — то же, что при первом запуске.' : 'Бесконечные доски поверх обычных файлов. Два вопроса — и можно работать.'}</div>
             </div>
           </header>
 
@@ -134,20 +132,6 @@ export function SetupDialog(props: {
             <div class="step-head"><span class="step-num">2</span>Как тебя подписывать</div>
             <div class="step-note">Имя в комментариях и реакциях на досках.</div>
             <input class="setup-input" value={author()} onInput={(e) => setAuthor(e.currentTarget.value)} placeholder={props.info.defaultAuthor} />
-          </section>
-
-          <section class="setup-step">
-            <div class="step-head"><span class="step-num">3</span>Обновления</div>
-            <label class="switch-row">
-              <span class="switch">
-                <input type="checkbox" checked={autoUpdate()} onChange={(e) => setAutoUpdate(e.currentTarget.checked)} />
-                <span class="switch-track" />
-              </span>
-              <span>
-                Обновляться самому
-                <span class="step-note">Когда на GitHub выходит новый релиз, vaultboard.vbs поставит его при следующем запуске.</span>
-              </span>
-            </label>
           </section>
 
           <button class="setup-more" onClick={() => setMore(!more())}>{more() ? '▾' : '▸'} Дополнительно</button>

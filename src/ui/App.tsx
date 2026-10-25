@@ -29,11 +29,12 @@ import { LayersPanel } from './LayersPanel.tsx';
 import { HelpDialog } from './HelpDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
 import { SetupDialog } from './SetupDialog.tsx';
-import { CHECK_UPDATE_EVENT, Updater } from './Updater.tsx';
 import { SearchBar } from './SearchBar.tsx';
 import { Minimap } from './Minimap.ts';
 import { searchBoardWith } from '../editor/search.ts';
-import type { Settings, SetupInfo, UpdateStatus } from '../io/vault.ts';
+import type { Settings, SetupInfo } from '../io/vault.ts';
+import { ask } from './ask.tsx';
+import { desktop } from '../io/desktop.ts';
 import { EmbedLayer } from './EmbedLayer.ts';
 import { CommentsLayer } from './CommentsLayer.ts';
 import { ThreadPopover } from './ThreadPopover.tsx';
@@ -87,6 +88,8 @@ const GUEST_NAME_KEY = 'vaultboard:guest-name';
 const CAMERA_KEY = 'vaultboard:camera:';
 /** Какая доска была открыта последней — с неё начинается следующий запуск. */
 const LAST_BOARD_KEY = 'vaultboard:last-board';
+/** Папка доски, которая открывается по умолчанию. */
+const DRAFT_BOARD = 'Черновик';
 
 function loadCamera(path: string): { x: number; y: number; zoom: number } | null {
   try {
@@ -174,10 +177,8 @@ export function App() {
   const [setup, setSetup] = createSignal<SetupInfo | null>(null);
   /** Мастер открыт повторно (не первая настройка) — его можно закрыть, текущие значения подставлены. */
   const [wizardAgain, setWizardAgain] = createSignal<Settings | null>(null);
-  /** Вышел новый релиз — показываем плашку (её можно закрыть). */
-  const [update, setUpdate] = createSignal<UpdateStatus | null>(null);
-  /** Номер версии: вшитый при сборке, пока сервер не сообщил свой. */
-  const [version, setVersion] = createSignal(__APP_VERSION__);
+  /** Настольное приложение скачало новую версию — плашка «Перезапустить» (её можно закрыть: поставится при выходе). */
+  const [updateReady, setUpdateReady] = createSignal<string | null>(null);
   /** Панель досок свёрнута — выезжает поверх доски, когда мышь у левого края. Запоминается. */
   const [collapsed, setCollapsed] = createSignal(readFlag('vaultboard:sidebar-collapsed'));
   const [peek, setPeek] = createSignal(false);
@@ -468,7 +469,7 @@ export function App() {
     return [
       ...ed.styleNames().map((n, i): MenuEntry => ({ label: n, hint: i < 9 ? `Alt+${i + 1}` : undefined, checked: look?.style === n && look.hasStyle, action: () => ed.applyStyle(n) })),
       ...(ed.styleNames().length ? ['sep' as const] : []),
-      { label: 'Сохранить как стиль…', action: () => { const n = window.prompt('Название стиля, например «Факт [К]»'); if (n) ed.saveStyle(n); } },
+      { label: 'Сохранить как стиль…', action: () => void ask('Название стиля, например «Факт [К]»').then((n) => { if (n) ed.saveStyle(n); }) },
       { label: `Обновить стиль «${look?.style ?? ''}» по этому объекту`, disabled: !look?.hasStyle, action: () => ed.updateStyleFromSelection() },
       { label: 'Сбросить к стилю', disabled: !look?.hasStyle, action: () => ed.resetToStyle() },
       { label: 'Выделить все с этим стилем', disabled: !look?.hasStyle, action: () => look?.style && ed.selectByStyle(look.style) },
@@ -607,7 +608,7 @@ export function App() {
         action: () => ed.moveSelectionToLayer(l.id),
       })),
       'sep',
-      { label: 'Новый слой из выделенного…', action: () => { const n = window.prompt('Название слоя, например «Фото»'); if (n?.trim()) ed.addLayer(n.trim(), true); } },
+      { label: 'Новый слой из выделенного…', action: () => void ask('Название слоя, например «Фото»').then((n) => { if (n?.trim()) ed.addLayer(n.trim(), true); }) },
       { label: 'Слои…', hint: 'Shift+L', action: () => setLayersOpen(true) },
     ];
   }
@@ -942,10 +943,10 @@ export function App() {
     }
   }
 
-  async function createBoard(name: string) {
-    // Новая доска — папка с файлом доска.board: всё её содержимое будет лежать внутри.
+  /** Записать новую пустую доску — папку с файлом доска.board: всё её содержимое будет лежать внутри. Путь или null. */
+  async function makeBoard(name: string): Promise<string | null> {
     const folder = name.trim().replace(/\\/g, '/').replace(/\/+$/, '').replace(/\.board$/i, '');
-    if (!folder) return;
+    if (!folder) return null;
     const path = `${folder}/${BOARD_FILE}`;
     const doc = emptyBoard();
     doc.meta.id = crypto.randomUUID();
@@ -953,10 +954,26 @@ export function App() {
     const res = await vault.writeBoard(path, serializeBoard(doc), 'new');
     if (!res.ok) {
       setError(res.error);
-      return;
+      return null;
     }
+    return path;
+  }
+
+  async function createBoard(name: string) {
+    const path = await makeBoard(name);
+    if (!path) return;
     setNewName(null);
     await refreshBoards();
+    await openBoard(path);
+  }
+
+  /** Доска «Черновик» — готовая доска, которая открывается, когда открыть больше нечего. Нет её — создаётся. */
+  async function openDraft() {
+    const path = `${DRAFT_BOARD}/${BOARD_FILE}`;
+    if (!boards().some((b) => b.path === path)) {
+      if (!(await makeBoard(DRAFT_BOARD))) return;
+      await refreshBoards();
+    }
     await openBoard(path);
   }
 
@@ -1124,6 +1141,7 @@ export function App() {
       await openBoard(guestBoard);
       return;
     }
+    desktop?.onUpdateReady((u) => setUpdateReady(u.version));
     if (blocked) return;
     if (!SITE) void watchOutsideChanges();
     const params = new URLSearchParams(location.search);
@@ -1140,7 +1158,9 @@ export function App() {
       }
       if (last && boards().some((b) => b.path === last)) await openBoard(last);
       else if (SITE && boards().length) await openBoard(boards()[0].path);
-      else await mount(emptyBoard(), null, 'new', 'Черновик (не сохраняется) — создай или открой доску слева', performance.now());
+      else if (!SITE && !setup()) await openDraft();
+      // Папка с досками ещё не выбрана (первая настройка) — до её выбора пустая доска, которая не сохраняется.
+      else await mount(emptyBoard(), null, 'new', 'Черновик (не сохраняется) — сначала выбери папку с досками', performance.now());
     }
   });
 
@@ -1152,27 +1172,13 @@ export function App() {
         onMouseLeave={() => collapsed() && setPeek(false)}
       >
         <div class="side-head">
-          <button class="side-brand" title={owner() ? 'Мастер настройки: папка с досками, имя, обновления' : 'vaultboard'} onClick={() => owner() && void openWizard()}>
+          <button class="side-brand" title={owner() ? 'Мастер настройки: папка с досками, имя' : 'vaultboard'} onClick={() => owner() && void openWizard()}>
             <span class="logo">vb</span>
             <span class="side-title">
               <b>
                 vaultboard{' '}
                 <Show when={owner()}>
-                <span
-                  class="side-version"
-                  role="button"
-                  title="Проверить обновления сейчас"
-                  onClick={(e) => {
-                    // Не открывать мастер настройки (щелчок по шапке) — это отдельная кнопка.
-                    e.stopPropagation();
-                    window.dispatchEvent(new Event(CHECK_UPDATE_EVENT));
-                  }}
-                >
-                  v{version()} ⟳
-                </span>
-                </Show>
-                <Show when={update()}>
-                  {(u) => <span class="side-update" title={`Вышла ${u().latest!.tag} — поставится при следующем запуске`}>↑ {u().latest!.tag}</span>}
+                  <span class="side-version">v{__APP_VERSION__}</span>
                 </Show>
               </b>
               <span class="root" title={root()}>{SITE ? 'Опубликованные доски · только просмотр' : root()}</span>
@@ -1355,24 +1361,39 @@ export function App() {
                   location.reload();
                   return;
                 }
-                void refreshBoards().catch((err: Error) => setError(err.message));
                 void files.refresh().catch(() => undefined);
                 void vault.getLibrary().then(setLibrary).catch(() => undefined);
                 void vault.getSettings().then((s) => setAuthor(s.author || s.defaultAuthor || 'Я'), () => undefined);
-                flash(again ? 'Настройки сохранены' : 'Готово. Создай первую доску кнопкой «+» слева');
+                if (again) {
+                  void refreshBoards().catch((err: Error) => setError(err.message));
+                  flash('Настройки сохранены');
+                } else {
+                  // Первая настройка — сразу готовая доска «Черновик», а не пустое место.
+                  void refreshBoards()
+                    .then(openDraft)
+                    .then(() => flash('Готово. Это доска «Черновик»; новые доски — кнопкой «+» слева'))
+                    .catch((err: Error) => setError(err.message));
+                }
               }}
             />
           )}
         </Show>
-        <Show when={owner()}>
-        <Updater
-          onStatus={setUpdate}
-          onNotice={flash}
-          onVersion={setVersion}
-          beforeRestart={async () => {
-            if (opened?.session?.hasUnsaved) await opened.session.save();
-          }}
-        />
+        <Show when={owner() && updateReady()}>
+          {(version) => (
+            <div class="update-banner">
+              <span>Готова версия <b>{version()}</b> — поставится при выходе</span>
+              <button
+                class="ub-now"
+                onClick={async () => {
+                  if (opened?.session?.hasUnsaved) await opened.session.save();
+                  desktop?.installUpdate();
+                }}
+              >
+                Перезапустить
+              </button>
+              <button title="Скрыть: обновление поставится при выходе из vaultboard" onClick={() => setUpdateReady(null)}>×</button>
+            </div>
+          )}
         </Show>
         <Show when={inviting() && /\.board$/i.test(current())}>
           <InviteDialog board={current()} title={boardTitleOf(current())} onClose={() => setInviting(false)} onChanged={sharedChanged} />

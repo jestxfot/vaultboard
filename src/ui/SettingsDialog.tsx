@@ -1,7 +1,7 @@
-// Настройки этого компьютера (не доски): папка с досками, имя в комментариях, обновления,
+// Настройки этого компьютера (не доски): папка с досками, имя в комментариях,
 // прокси, через который сервер ходит за карточками ссылок.
 import { createSignal, onMount, Show } from 'solid-js';
-import { type UpdateStatus, vault } from '../io/vault.ts';
+import { vault } from '../io/vault.ts';
 import { FolderPicker } from './FolderPicker.tsx';
 
 export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { author?: string }) => void }) {
@@ -11,9 +11,6 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
   const [root, setRoot] = createSignal('');
   const [savedRoot, setSavedRoot] = createSignal('');
   const [fixedRoot, setFixedRoot] = createSignal<string | null>(null);
-  const [autoUpdate, setAutoUpdate] = createSignal(true);
-  const [upd, setUpd] = createSignal<UpdateStatus | null>(null);
-  const [checking, setChecking] = createSignal(true);
   const [picking, setPicking] = createSignal(false);
   const [status, setStatus] = createSignal('');
   const [busy, setBusy] = createSignal(false);
@@ -26,9 +23,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
       setRoot(s.vaultRoot ?? '');
       setSavedRoot(s.vaultRoot ?? '');
       setFixedRoot(s.fixedRoot ?? null);
-      setAutoUpdate(s.autoUpdate !== false);
     }, () => undefined);
-    vault.updateStatus().then(setUpd, () => undefined).finally(() => setChecking(false));
   });
 
   const save = async () => {
@@ -38,7 +33,6 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
       await vault.putSettings({
         proxy: proxy().trim(),
         author: author().trim(),
-        autoUpdate: autoUpdate(),
         ...(rootChanged ? { vaultRoot: root() } : {}),
       });
       props.onSaved?.({ author: author().trim() || defaultAuthor() });
@@ -66,21 +60,6 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
     } finally {
       setBusy(false);
     }
-  };
-
-  const checkNow = async () => {
-    setChecking(true);
-    setUpd(await vault.updateStatus(true).catch(() => null));
-    setChecking(false);
-  };
-
-  const updateText = () => {
-    const u = upd();
-    if (checking()) return 'Проверяю…';
-    if (!u) return 'Не удалось узнать.';
-    if (!u.latest) return `Версия ${u.current}. Релизов на GitHub пока нет или GitHub не ответил.`;
-    if (!u.available) return `Версия ${u.current} — последняя.`;
-    return `Версия ${u.current}. Вышла ${u.latest.tag}${u.git ? ' — у тебя копия из git: обнови через git pull.' : ' — поставится при следующем запуске vaultboard.vbs.'}`;
   };
 
   return (
@@ -116,26 +95,6 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
           <section class="setup-step">
             <div class="step-head small">Имя в комментариях</div>
             <input class="setup-input" placeholder={defaultAuthor() || 'Имя'} value={author()} onInput={(e) => setAuthor(e.currentTarget.value)} />
-          </section>
-
-          <section class="setup-step">
-            <div class="step-head small">Обновления</div>
-            <div class="settings-row">
-              <label class="switch-row">
-                <span class="switch">
-                  <input type="checkbox" checked={autoUpdate()} onChange={(e) => setAutoUpdate(e.currentTarget.checked)} />
-                  <span class="switch-track" />
-                </span>
-                <span>Обновляться самому при запуске</span>
-              </label>
-              <button class="soft-btn" disabled={checking()} onClick={() => void checkNow()}>Проверить сейчас</button>
-            </div>
-            <div class="step-note">
-              {updateText()}{' '}
-              <Show when={upd()?.latest}>
-                <a href={upd()!.latest!.url} target="_blank" rel="noopener">Что нового</a>
-              </Show>
-            </div>
           </section>
 
           <section class="setup-step">

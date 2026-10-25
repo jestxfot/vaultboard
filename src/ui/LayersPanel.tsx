@@ -2,6 +2,7 @@
 // щелчок по строке — слой становится активным, и новые объекты ложатся на него.
 import { createSignal, For, Show } from 'solid-js';
 import type { Editor, EditorUi } from '../editor/Editor.ts';
+import { ask } from './ask.tsx';
 
 function Eye(props: { open: boolean }) {
   return (
@@ -30,8 +31,8 @@ export function LayersPanel(props: { editor: Editor; ui: EditorUi; onClose: () =
   const usage = () => (props.ui, props.editor.layerUsage());
   const active = () => (props.ui, props.editor.activeLayer);
 
-  const add = (fromSelection: boolean) => {
-    const name = window.prompt('Название слоя, например «Фото»', fromSelection ? 'Выделенное' : `Слой ${layers().length + 1}`);
+  const add = async (fromSelection: boolean) => {
+    const name = await ask('Название слоя, например «Фото»', fromSelection ? 'Выделенное' : `Слой ${layers().length + 1}`);
     if (name?.trim()) props.editor.addLayer(name.trim(), fromSelection);
   };
 

@@ -1,8 +1,8 @@
-// Собственный сервер готовой сборки: отдаёт собранное приложение (папка dist) и API (/api/…).
+// Сервер приложения: отдаёт собранное приложение (папка dist) и API (/api/…).
 // Без Vite и без node_modules — его вместе со всеми зависимостями собирают в один файл dist-server/server.mjs
-// (npm run build), поэтому готовой установке из релиза не нужны ни npm install, ни сборка: запуск — секунда.
+// (npm run build). Настольное приложение (electron/main.ts) запускает этот файл отдельным процессом.
 //
-// Запуск: node dist-server/server.mjs [порт]. Слушает только этот компьютер (127.0.0.1).
+// Запуск без приложения: node dist-server/server.mjs [порт]. Слушает только этот компьютер (127.0.0.1).
 import http from 'node:http';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -29,7 +29,7 @@ const TYPES: Record<string, string> = {
 };
 
 const vault = createVaultServer(process.env.VAULT_ROOT || undefined);
-vault.start({ projectDir, port, canRestart: true });
+vault.start({ projectDir, port });
 
 /** Файл приложения из dist. Файлы с отпечатком в имени (assets/…) кэшируются навсегда, index.html — никогда. */
 async function serveStatic(pathname: string, res: http.ServerResponse): Promise<void> {
@@ -79,4 +79,21 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`vaultboard: http://localhost:${port}/`);
+});
+
+/** Выход: сохранить то, что ещё не на диске, и завершиться. Повторная просьба во время выхода ничего не меняет. */
+let quitting = false;
+async function quit(): Promise<void> {
+  if (quitting) return;
+  quitting = true;
+  server.close();
+  await vault.shutdown().catch((err: unknown) => console.error(err));
+  process.exit(0);
+}
+process.on('SIGINT', () => void quit());
+process.on('SIGTERM', () => void quit());
+// Настольное приложение запускает сервер через utilityProcess (у процесса есть parentPort) и просит выйти сообщением «quit».
+const parentPort = (process as NodeJS.Process & { parentPort?: { on: (event: 'message', cb: (e: { data: unknown }) => void) => void } }).parentPort;
+parentPort?.on('message', (e) => {
+  if (e.data === 'quit') void quit();
 });

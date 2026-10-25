@@ -1,0 +1,68 @@
+# Релиз: на тег vX.Y.Z (его ставит npm run release) собираем установщики на Windows и Linux
+# и выкладываем их в релиз GitHub — вместе с latest*.yml и .blockmap, по которым приложение обновляется само.
+name: Релиз
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      # Только собрать: выкладывает один общий шаг ниже, когда готовы обе системы.
+      - run: npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+            release/*.blockmap
+            release/latest*.yml
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Релиз с установщиками
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Что нового — заголовки коммитов с прошлого релиза.
+          prev=$(git tag --list 'v*' --sort=-v:refname | grep -vx "$TAG" | head -1)
+          {
+            echo '## Что нового'
+            echo
+            git log --pretty=format:'- %s' ${prev:+$prev..}$TAG | grep -v '^- Релиз v' || echo '- первый релиз'
+            echo
+            echo
+            echo "**Установка:** Windows — скачай \`vaultboard-setup-${TAG#v}.exe\` ниже и запусти. Linux — AppImage или .deb."
+            echo 'У кого vaultboard уже стоит — новая версия скачается сама и поставится при выходе.'
+          } > notes.md
+          gh release create "$TAG" release/* --title "vaultboard $TAG" --notes-file notes.md

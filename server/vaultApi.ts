@@ -1,6 +1,6 @@
-// Сервер vaultboard: отдаёт браузеру файлы базы, настройки, первую настройку и обновления. Слушает только 127.0.0.1.
-// Ядро (createVaultServer) подключают и Vite при разработке (vaultApi), и сервер готовой сборки (standalone.ts).
-// В настольной версии (Tauri) этот слой заменится прямым доступом к диску.
+// Сервер vaultboard: отдаёт браузеру файлы базы, настройки и первую настройку. Слушает только 127.0.0.1.
+// Ядро (createVaultServer) подключают и Vite при разработке (vaultApi), и сервер приложения (standalone.ts),
+// который настольное приложение (electron/main.ts) запускает отдельным процессом.
 import type { Plugin } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { appendFileSync, createReadStream, createWriteStream, type FSWatcher, promises as fs, watch as fsWatch } from 'node:fs';
@@ -18,8 +18,6 @@ import type { Op } from '../src/model/store.ts';
 import { BoardFormatError, parseBoard } from '../src/format/board.ts';
 import { boardFolderOf, boardTitleOf, historyPathOf } from '../src/model/paths.ts';
 import { unfurl } from './unfurl.ts';
-import { spawn, spawnSync } from 'node:child_process';
-import { checkRelease, currentVersion, isGitCheckout, isNewer, type Release, settingsFile } from '../scripts/update.mjs';
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -38,7 +36,18 @@ const MIME: Record<string, string> = {
 
 const BOARD_FILE = /\.(board|canvas)$/i;
 
-/** Настройки этого компьютера (не доски): папка с досками, имя, прокси, автообновление. */
+/** Где лежат настройки на этой системе: %LOCALAPPDATA%\vaultboard, ~/Library/Application Support/vaultboard или ~/.config/vaultboard. */
+function settingsFile(): string {
+  const home = os.homedir();
+  const dir = process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local'), 'vaultboard')
+    : process.platform === 'darwin'
+      ? path.join(home, 'Library', 'Application Support', 'vaultboard')
+      : path.join(process.env.XDG_CONFIG_HOME ?? path.join(home, '.config'), 'vaultboard');
+  return path.join(dir, 'settings.json');
+}
+
+/** Настройки этого компьютера (не доски): папка с досками, имя, прокси. */
 const SETTINGS_FILE = settingsFile();
 
 /**
@@ -69,8 +78,6 @@ interface Settings {
   author?: string;
   /** Папка с досками и заметками (корень базы). */
   vaultRoot?: string;
-  /** Обновляться на новые релизы при запуске. Нет поля — да. */
-  autoUpdate?: boolean;
   /** Папка сайта, куда публикуются доски (её выкладывают на Vercel). */
   siteDir?: string;
   /** Адрес опубликованного сайта (https://….vercel.app) — ссылки-приглашения ведут на него. */
@@ -96,7 +103,7 @@ async function writeSettings(next: Settings): Promise<void> {
   settingsCache = next;
 }
 
-/** Строка в общий лог запуска (%TEMP%\vaultboard.log) — там же пишут vaultboard.vbs и перезапуск. */
+/** Строка в лог сервера (%TEMP%\vaultboard.log). */
 function logLine(text: string): void {
   try {
     appendFileSync(path.join(os.tmpdir(), 'vaultboard.log'), `${text}\n`);
@@ -164,8 +171,10 @@ async function readBody(req: IncomingMessage): Promise<string> {
 export interface VaultServer {
   /** Обработчик запросов /api/… (адрес уже без «/api»). */
   api: (req: IncomingMessage, res: ServerResponse) => void;
-  /** Запустить: папка программы, порт; `canRestart` — это обычная установка, её можно перезапускать с обновлением. */
-  start: (opts: { projectDir: string; port: number; canRestart: boolean }) => void;
+  /** Запустить: папка программы (в ней собранное приложение dist — его копирует публикация) и порт. */
+  start: (opts: { projectDir: string; port: number }) => void;
+  /** Перед выходом: дописать на диск правки общих досок и закрыть туннель для гостей. */
+  shutdown: () => Promise<void>;
 }
 
 /**
@@ -174,42 +183,9 @@ export interface VaultServer {
  */
 export function createVaultServer(fixedRoot?: string): VaultServer {
   const envRoot = fixedRoot ? path.resolve(fixedRoot) : null;
-  /** Папка проекта — задаётся при старте сервера (там же лежит package.json с версией). */
+  /** Папка программы — задаётся при старте сервера. */
   let projectDir = process.cwd();
-  /** Работает собранная копия (vite preview, как запускает vaultboard.vbs) — её можно перезапустить с обновлением. */
-  let canRestart = false;
   let servePort = 5180;
-  /** Когда кто-то в последний раз работал с доской (опрос версии не считается). */
-  let lastActivity = Date.now();
-
-  /**
-   * Перезапуск с обновлением: отдельный процесс дождётся, пока этот сервер завершится, обновит и запустит заново.
-   *
-   * На Windows npm запускает сервер внутри «задания» (job): всё, что сервер породит, Windows убьёт вместе с ним,
-   * даже «отсоединённое». Поэтому процесс перезапуска создаём через WMI — он ни к какому заданию не привязан,
-   * окно скрыто. Окружение сервера он не наследует, поэтому нужные переменные передаём ему в аргументе.
-   */
-  function restartWithUpdate(): void {
-    const pass: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && (k.startsWith('VAULTBOARD_') || ['LOCALAPPDATA', 'APPDATA', 'XDG_CONFIG_HOME', 'VAULT_ROOT'].includes(k))) pass[k] = v;
-    }
-    const args = [path.join(projectDir, 'scripts', 'restart.mjs'), String(servePort), Buffer.from(JSON.stringify(pass)).toString('base64')];
-    let started = false;
-    if (process.platform === 'win32') {
-      const q = (s: string) => `"${s}"`;
-      const line = [process.execPath, ...args].map(q).join(' ').replace(/'/g, "''");
-      const ps =
-        `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }; ` +
-        `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${line}'; CurrentDirectory = '${projectDir.replace(/'/g, "''")}'; ProcessStartupInformation = $si }; ` +
-        `exit $r.ReturnValue`;
-      const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true, timeout: 20000, encoding: 'utf8' });
-      started = r.status === 0;
-      logLine(`[сервер] перезапуск через WMI: ${started ? 'запущен' : `не вышло (${r.status ?? r.error?.message}) ${(r.stderr ?? '').trim().slice(0, 400)}`}`);
-    }
-    if (!started) spawn(process.execPath, args, { cwd: projectDir, detached: true, windowsHide: true, stdio: 'ignore' }).unref();
-    setTimeout(() => process.exit(0), 400);
-  }
 
   // ---------- слежение за файлами папки с досками ----------
 
@@ -284,75 +260,6 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     const oldest = changeLog[0]?.seq ?? changeSeq + 1;
     if (since > changeSeq || (since < oldest - 1 && changeLog.length)) return { seq: changeSeq, paths: [], reset: true };
     return { seq: changeSeq, paths: [...new Set(changeLog.filter((c) => c.seq > since).map((c) => c.path))] };
-  }
-
-  // ---------- релизы: одна фоновая проверка на весь сервер ----------
-
-  /** Последний релиз, как его знает сервер. Все вкладки берут его отсюда, а не спрашивают GitHub каждая. */
-  let known: Release | null = null;
-  let etag = '';
-  let checkedAt = 0;
-  /** GitHub сказал, что лимит кончился, — до этого времени не спрашиваем. */
-  let retryAt = 0;
-  /** Вкладки, которые ждут новостей о версии (долгий запрос /update/wait). */
-  const waiters = new Set<() => void>();
-
-  /**
-   * Спросить GitHub условным запросом (ETag): если ничего не поменялось, ответ «304» лимит не тратит.
-   * Не чаще раза в 20 секунд, даже по просьбе «проверить сейчас».
-   */
-  async function refreshRelease(): Promise<void> {
-    const now = Date.now();
-    if (now < retryAt || now - checkedAt < 20_000) return;
-    checkedAt = now;
-    const r = await checkRelease(etag);
-    if (r.error !== undefined) {
-      if (r.retryAt) retryAt = r.retryAt;
-      return;
-    }
-    if (!r.changed) return;
-    const was = known?.tag;
-    known = r.release;
-    etag = r.etag;
-    if (known?.tag !== was) for (const wake of [...waiters]) wake();
-  }
-
-  async function updateStatus() {
-    const git = isGitCheckout(projectDir);
-    const current = currentVersion(projectDir);
-    return {
-      current,
-      git,
-      enabled: (await readSettings()).autoUpdate !== false,
-      latest: known,
-      available: !!known && isNewer(known.tag, current),
-      // Кнопка «Обновить сейчас»: только у обычной установки (не git и не сервер разработки).
-      canApply: canRestart && !git,
-    };
-  }
-
-  /**
-   * Следить за релизами. Раз в 3 минуты — условный запрос к GitHub (почти всегда «304», лимит не тратит).
-   * Вышла новая версия, автообновление включено, а с доской давно никто не работает (вкладки закрыты
-   * или брошены) — сервер обновляется и перезапускается сам. Открытая вкладка ждёт его и перезагружается.
-   * Для проверки сценария можно ускорить: VAULTBOARD_WATCH_MS — как часто смотреть, VAULTBOARD_IDLE_MS — сколько тишины ждать.
-   */
-  function watchReleases(): void {
-    const every = Number(process.env.VAULTBOARD_WATCH_MS) || 3 * 60_000;
-    const quiet = Number(process.env.VAULTBOARD_IDLE_MS) || 10 * 60_000;
-    // Копия из git (разработка) по таймеру GitHub не спрашивает: обновляется она через git pull, а лимит API
-    // (60 запросов в час с одного адреса) общий с установкой на этом же компьютере — его нельзя тратить зря.
-    // Узнать версию в ней можно щелчком по номеру версии.
-    if (isGitCheckout(projectDir)) return;
-    void refreshRelease();
-    setInterval(async () => {
-      checkedAt = Math.min(checkedAt, Date.now() - 20_000);
-      await refreshRelease();
-      if (!canRestart) return;
-      if ((await readSettings()).autoUpdate === false) return;
-      if (Date.now() - lastActivity < quiet) return;
-      if (known && isNewer(known.tag, currentVersion(projectDir)) && !hub.busy) void hub.flush().finally(restartWithUpdate);
-    }, every).unref();
   }
 
   async function currentRoot(): Promise<string | null> {
@@ -698,44 +605,6 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
       return sendJson(res, 200, { path: abs });
     }
 
-    if (req.method === 'GET' && url.pathname === '/update') {
-      // Что известно о версии. «force» — спросить GitHub сейчас (всё равно не чаще раза в 20 секунд).
-      if (url.searchParams.has('force') || (!checkedAt && !isGitCheckout(projectDir))) await refreshRelease();
-      return sendJson(res, 200, await updateStatus());
-    }
-
-    if (req.method === 'GET' && url.pathname === '/update/wait') {
-      // Долгий запрос: вкладка говорит, какую версию уже знает, а сервер отвечает, только когда узнает о другой
-      // (или через 4 минуты — тогда вкладка просто спросит снова). Так новости о релизе приходят сразу,
-      // без постоянных опросов; а оборванное соединение значит, что сервер перезапускается.
-      const knownTag = url.searchParams.get('known') ?? '';
-      if ((known?.tag ?? '') !== knownTag) return sendJson(res, 200, await updateStatus());
-      await new Promise<void>((resolve) => {
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          clearTimeout(timer);
-          waiters.delete(finish);
-          resolve();
-        };
-        const timer = setTimeout(finish, 240_000);
-        waiters.add(finish);
-        req.on('close', finish);
-      });
-      if (res.writableEnded || res.destroyed) return;
-      return sendJson(res, 200, await updateStatus());
-    }
-
-    if (req.method === 'POST' && url.pathname === '/update/apply') {
-      if (!canRestart || isGitCheckout(projectDir)) {
-        return sendJson(res, 400, { error: 'Обновление кнопкой работает только в обычной установке (vaultboard.vbs)' });
-      }
-      sendJson(res, 200, { ok: true });
-      void hub.flush().finally(restartWithUpdate);
-      return;
-    }
-
     if (req.method === 'GET' && url.pathname === '/obsidian-vaults') {
       // Читаем каждый раз: хранилище могли только что добавить в Obsidian.
       return sendJson(res, 200, { root: (await currentRoot()) ?? '', vaults: await obsidianVaults() });
@@ -756,7 +625,6 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
           if (raw.author?.trim()) next.author = raw.author.trim().slice(0, 60);
           else delete next.author;
         }
-        if ('autoUpdate' in raw) next.autoUpdate = raw.autoUpdate !== false;
         if ('siteUrl' in raw) {
           const u = raw.siteUrl?.trim().replace(/\/+$/, '');
           if (u) {
@@ -1134,7 +1002,6 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
   }
 
   const api = (req: IncomingMessage, res: ServerResponse) => {
-    if (!req.url?.startsWith('/update') && !req.url?.startsWith('/setup')) lastActivity = Date.now();
     handle(req, res).catch((err: unknown) => {
       const status = err instanceof VaultPathError ? 403 : err instanceof BoardFormatError ? 400 : 500;
       sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
@@ -1146,8 +1013,10 @@ export function createVaultServer(fixedRoot?: string): VaultServer {
     start(opts) {
       projectDir = opts.projectDir;
       servePort = opts.port;
-      canRestart = opts.canRestart;
-      watchReleases();
+    },
+    async shutdown() {
+      tunnel.stop();
+      await hub.flush();
     },
   };
 }
@@ -1158,11 +1027,11 @@ export function vaultApi(fixedRoot?: string): Plugin {
   return {
     name: 'vaultboard-vault-api',
     configureServer(server) {
-      vault.start({ projectDir: server.config.root, port: server.config.server.port ?? 5173, canRestart: false });
+      vault.start({ projectDir: server.config.root, port: server.config.server.port ?? 5173 });
       server.middlewares.use('/api', vault.api);
     },
     configurePreviewServer(server) {
-      vault.start({ projectDir: server.config.root, port: server.config.preview.port ?? 5180, canRestart: true });
+      vault.start({ projectDir: server.config.root, port: server.config.preview.port ?? 5180 });
       server.middlewares.use('/api', vault.api);
     },
   };

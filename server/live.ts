@@ -219,7 +219,7 @@ export class LiveHub {
     }
   }
 
-  /** Записать все несохранённые доски сейчас (перед перезапуском сервера). */
+  /** Записать все несохранённые доски сейчас (перед выходом сервера). */
   async flush(): Promise<void> {
     for (const b of this.boards.values()) {
       if (!b.dirty) continue;

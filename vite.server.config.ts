@@ -3,6 +3,8 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  // Папка public (значок страницы) нужна только самой странице — в dist.
+  publicDir: false,
   build: {
     ssr: 'server/standalone.ts',
     outDir: 'dist-server',

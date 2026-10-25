@@ -23,7 +23,6 @@ export interface Settings {
   proxy?: string;
   author?: string;
   vaultRoot?: string;
-  autoUpdate?: boolean;
   /** Папка сайта для публикации досок. */
   siteDir?: string;
   /** Адрес опубликованного сайта — ссылки-приглашения ведут на него. */
@@ -85,16 +84,6 @@ export interface PublishResult {
   removed: number;
   missing: string[];
   git: { ok: boolean; output: string } | null;
-}
-
-export interface UpdateStatus {
-  current: string;
-  git: boolean;
-  enabled: boolean;
-  latest: { tag: string; name: string; notes: string; url: string } | null;
-  available: boolean;
-  /** Можно обновиться кнопкой, не закрывая приложение. */
-  canApply: boolean;
 }
 
 const serverVault = {
@@ -215,18 +204,6 @@ const serverVault = {
   dirs: (path: string) => request<DirList>(`/api/fs/dirs?path=${encodeURIComponent(path)}`),
 
   mkdir: (parent: string, name: string) => request<{ path: string }>('/api/fs/mkdir', { method: 'POST', body: JSON.stringify({ parent, name }) }),
-
-  /** Вышел ли новый релиз на GitHub. `force` — спросить GitHub сейчас, а не взять ответ часовой давности. */
-  updateStatus: (force = false) => request<UpdateStatus>(`/api/update${force ? '?force' : ''}`),
-
-  /**
-   * Долгий запрос: сервер ответит, когда узнает о версии, отличной от `known` (или через 4 минуты).
-   * Оборвался — значит, сервер перезапускается.
-   */
-  updateWait: (known: string) => request<UpdateStatus>(`/api/update/wait?known=${encodeURIComponent(known)}`),
-
-  /** Обновиться сейчас: сервер перезапустится с новой версией (страницу потом перезагрузить). */
-  applyUpdate: () => request<{ ok: boolean }>('/api/update/apply', { method: 'POST' }),
 
   resolve: (from: string, refs: string[]) =>
     request<Record<string, string | null>>('/api/resolve', {
@@ -370,9 +347,6 @@ const siteVault: typeof serverVault = {
   setup: async () => ({ root: 'site', fixed: true, defaultAuthor: '', obsidian: false, suggestions: [] }),
   dirs: async () => readOnly(),
   mkdir: async () => readOnly(),
-  updateStatus: () => never(),
-  updateWait: () => never(),
-  applyUpdate: async () => readOnly(),
   async resolve(from, refs) {
     // Как на сервере: от папки файла вверх до корня — первый существующий путь.
     const out: Record<string, string | null> = {};
