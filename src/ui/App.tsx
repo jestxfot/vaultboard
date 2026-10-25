@@ -1006,6 +1006,10 @@ export function App() {
   async function runBenchSuite() {
     history.replaceState(null, '', '?bench=suite');
     const all: PhaseResult[] = [];
+    // Окно замера показывается не сразу, а в скрытом окне браузер не рисует кадры: замер первой фазы
+    // поймал бы эту паузу. Ждём, пока окно видно и кадры идут.
+    while (document.visibilityState !== 'visible') await new Promise((r) => setTimeout(r, 100));
+    for (let i = 0; i < 10; i++) await new Promise((r) => requestAnimationFrame(r));
     desktop?.log('замер скорости: начало');
     for (const count of [300, 2000]) {
       for (const cache of [true, false]) {
