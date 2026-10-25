@@ -24,7 +24,7 @@ asarUnpack:
   - dist-server/**
 
 # Обновления: установленное приложение спрашивает GitHub Releases о новой версии (latest.yml, latest-linux.yml)
-# и скачивает только изменившиеся части установщика (файлы .blockmap). Их кладёт в релиз npm run release.
+# и скачивает только изменившиеся части установщика (файлы .blockmap). В релиз их кладёт .github/workflows/release.yml.
 publish:
   provider: github
   owner: jestxfot

@@ -7,25 +7,27 @@
   Var DesktopCheckbox
   Var WantDesktop
 
+  ; Функции шага — внутри макроса: этот файл подключается раньше Modern UI (MUI_HEADER_TEXT),
+  ; а макрос раскрывается уже среди страниц установщика, когда Modern UI подключён.
   !macro customPageAfterChangeDir
     Page custom DesktopPageCreate DesktopPageLeave
+
+    Function DesktopPageCreate
+      !insertmacro MUI_HEADER_TEXT "Ярлыки" "Откуда запускать vaultboard"
+      nsDialogs::Create 1018
+      Pop $0
+      ${NSD_CreateLabel} 0 0 100% 24u "vaultboard появится в меню «Пуск». Можно добавить ярлык и на рабочий стол."
+      Pop $0
+      ${NSD_CreateCheckbox} 0 30u 100% 12u "Ярлык на рабочем столе"
+      Pop $DesktopCheckbox
+      ${NSD_Check} $DesktopCheckbox
+      nsDialogs::Show
+    FunctionEnd
+
+    Function DesktopPageLeave
+      ${NSD_GetState} $DesktopCheckbox $WantDesktop
+    FunctionEnd
   !macroend
-
-  Function DesktopPageCreate
-    !insertmacro MUI_HEADER_TEXT "Ярлыки" "Откуда запускать vaultboard"
-    nsDialogs::Create 1018
-    Pop $0
-    ${NSD_CreateLabel} 0 0 100% 24u "vaultboard появится в меню «Пуск». Можно добавить ярлык и на рабочий стол."
-    Pop $0
-    ${NSD_CreateCheckbox} 0 30u 100% 12u "Ярлык на рабочем столе"
-    Pop $DesktopCheckbox
-    ${NSD_Check} $DesktopCheckbox
-    nsDialogs::Show
-  FunctionEnd
-
-  Function DesktopPageLeave
-    ${NSD_GetState} $DesktopCheckbox $WantDesktop
-  FunctionEnd
 !endif
 
 !macro customInstall
