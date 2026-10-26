@@ -53,18 +53,58 @@ export function ImageViewer(props: { items: ImageItem[]; index: number; onClose:
   );
 
   let drag: { x: number; y: number } | null = null;
+  /** Пальцы на экране (iPad): двумя — масштаб и сдвиг, двойное касание — вписать или 100%. */
+  const fingers = new Map<number, { x: number; y: number }>();
+  let pinch: { dist: number; x: number; y: number } | null = null;
+  let lastTap = 0;
+  const span = () => {
+    const [a, b] = [...fingers.values()];
+    const r = box.getBoundingClientRect();
+    return { dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), x: (a.x + b.x) / 2 - r.left - r.width / 2, y: (a.y + b.y) / 2 - r.top - r.height / 2 };
+  };
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
-    drag = { x: e.clientX, y: e.clientY };
     box.setPointerCapture(e.pointerId);
+    if (e.pointerType === 'touch') {
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (fingers.size === 2) {
+        drag = null;
+        pinch = span();
+        return;
+      }
+      if (fingers.size > 2) return;
+      if (e.timeStamp - lastTap < 350) {
+        const r = box.getBoundingClientRect();
+        if (zoom() < 1) zoomAt(e.clientX - r.left - r.width / 2, e.clientY - r.top - r.height / 2, 1);
+        else fit();
+        lastTap = 0;
+        return;
+      }
+      lastTap = e.timeStamp;
+    }
+    drag = { x: e.clientX, y: e.clientY };
   };
   const onMove = (e: PointerEvent) => {
+    if (fingers.has(e.pointerId)) fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && fingers.size >= 2) {
+      const next = span();
+      const p = pos();
+      setPos({ x: p.x + next.x - pinch.x, y: p.y + next.y - pinch.y });
+      zoomAt(next.x, next.y, (zoom() * next.dist) / pinch.dist);
+      pinch = next;
+      return;
+    }
     if (!drag) return;
     const p = pos();
     setPos({ x: p.x + e.clientX - drag.x, y: p.y + e.clientY - drag.y });
     drag = { x: e.clientX, y: e.clientY };
   };
-  const onUp = () => (drag = null);
+  const onUp = (e: PointerEvent) => {
+    fingers.delete(e.pointerId);
+    if (fingers.size < 2) pinch = null;
+    drag = null;
+  };
+  const step = (d: number) => setI((i() + d + props.items.length) % props.items.length);
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
     const r = box.getBoundingClientRect();
@@ -92,7 +132,7 @@ export function ImageViewer(props: { items: ImageItem[]; index: number; onClose:
   });
 
   return (
-    <div class="viewer" ref={box} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onWheel={onWheel}>
+    <div class="viewer" ref={box} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onWheel={onWheel}>
       <img
         src={vault.fileUrl(item().file)}
         alt={name()}
@@ -120,9 +160,15 @@ export function ImageViewer(props: { items: ImageItem[]; index: number; onClose:
         </Show>
         <span class="viewer-zoom">{Math.round(zoom() * 100)}%</span>
         <Show when={props.items.length > 1}>
+          <button title="Предыдущее (←)" onClick={() => step(-1)}>‹</button>
           <span>{i() + 1} из {props.items.length}</span>
+          <button title="Следующее (→)" onClick={() => step(1)}>›</button>
         </Show>
-        <span class="viewer-hint">1 — пиксель в пиксель · 0 — вписать · колесо — зум · ←/→ — соседние · Esc — закрыть</span>
+        <span class="viewer-hint">
+          {matchMedia('(pointer: coarse)').matches
+            ? 'Двумя пальцами — зум · двойное касание — 100% или вписать'
+            : '1 — пиксель в пиксель · 0 — вписать · колесо — зум · ←/→ — соседние · Esc — закрыть'}
+        </span>
         <button onClick={() => props.onClose()}>×</button>
       </div>
     </div>

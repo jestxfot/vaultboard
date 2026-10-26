@@ -133,8 +133,9 @@ export class ImageCache {
 
   private async loadPreview(e: Entry, level: 0 | 1): Promise<void> {
     try {
-      const res = await fetch(vault.previewUrl(e.file, level));
-      if (res.ok) {
+      // Превью ещё нет: сервер отвечает 404, а файлы iPad — ошибкой запроса.
+      const res = await fetch(vault.previewUrl(e.file, level)).catch(() => null);
+      if (res?.ok) {
         this.setSlot(e, level, await createImageBitmap(await res.blob()));
         return;
       }

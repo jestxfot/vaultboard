@@ -86,6 +86,14 @@ type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 const BLUE = 0x4262ff;
 const HANDLE = 8;
 const DRAG_THRESHOLD = 4;
+/** Пальцем точно не попасть: ручки ловятся дальше, а сдвиг меньше этого — ещё нажатие, а не перетаскивание. */
+const TOUCH_REACH = 22;
+const TOUCH_THRESHOLD = 10;
+/** Удержание пальца без движения — меню, как правая кнопка мыши. */
+const LONG_PRESS_MS = 500;
+/** Два касания подряд не дальше этого по времени и месту — двойное касание (как двойной щелчок). */
+const DOUBLE_TAP_MS = 350;
+const DOUBLE_TAP_PX = 30;
 const CLIP_MARK = 'vaultboard/clip';
 
 interface PointerState {
@@ -215,6 +223,19 @@ export class Editor {
   private pointerDirty = false;
   private hover: string | null = null;
   private spaceDown = false;
+  /** Последнее нажатие — пальцем (на iPad): ручки и линии ловятся с запасом. */
+  private touchInput = false;
+  /** Пальцы на экране (по pointerId) и жест двумя пальцами: масштаб и сдвиг доски. */
+  private touches = new Map<number, { x: number; y: number }>();
+  private pinch: { dist: number; x: number; y: number; at: number; moved: boolean } | null = null;
+  /** Перо сейчас касается экрана — ладонь, лежащую рядом, не считаем касанием. */
+  private penDown = false;
+  private longPress = 0;
+  private lastTap: { time: number; x: number; y: number } | null = null;
+  /** Когда двойное касание уже обработано — чтобы двойной щелчок, который за ним может прислать WebKit, не сработал второй раз. */
+  private doubleTapAt = 0;
+  /** Инструмент «Текст» пальцем: поле ввода открывается при отпускании — иначе iPad не покажет клавиатуру. */
+  private textOnUp: Point | null = null;
   /** Направляющие привязки, которые сейчас видны (во время перетаскивания или изменения размера). */
   private guides: Guide[] = [];
   /** Объекты, к которым сейчас прилипает перетаскиваемое, — подсвечиваются; за краем экрана — плашкой у края. */
@@ -372,6 +393,21 @@ export class Editor {
   private onPointerDown(e: PointerEvent): void {
     // Щелчки внутри поля ввода — это работа с текстом, а не с доской.
     if ((e.target as HTMLElement).closest('.text-edit')) return;
+    this.touchInput = e.pointerType === 'touch';
+    if (e.pointerType === 'pen') this.penDown = true;
+    if (this.touchInput) {
+      // Ладонь, пока рисуют пером, — не касание.
+      if (this.penDown) return;
+      const r = this.host.getBoundingClientRect();
+      this.touches.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top });
+      if (this.touches.size >= 2) {
+        // Второй палец: что бы ни начал первый, теперь это масштаб и сдвиг доски.
+        e.preventDefault();
+        this.abortGesture();
+        if (this.touches.size === 2) this.pinch = { ...this.pinchSpan(), at: e.timeStamp, moved: false };
+        return;
+      }
+    }
     this.perf.noteInput(e.timeStamp);
     if (this.text.activeId) this.text.close('outside');
     const p = this.readPointer(e);
@@ -426,6 +462,10 @@ export class Editor {
     }
 
     if (this.tool === 'text') {
+      if (this.touchInput) {
+        this.textOnUp = w;
+        return;
+      }
       this.createTextAt(w);
       this.setTool('select');
       return;
@@ -473,6 +513,7 @@ export class Editor {
         this.select(this.unitOf(hit));
       }
       this.gesture = { kind: 'press', id: hit, downX: p.sx, downY: p.sy, start: w, toggleOff, alt: p.alt, fresh: !selected };
+      if (this.touchInput) this.startLongPress(e);
       return;
     }
 
@@ -483,6 +524,13 @@ export class Editor {
     }
     // Щёлкнули по объекту закреплённого слоя — он не выделяется; скажем почему, чтобы это не выглядело поломкой.
     this.explainLockedLayer(w);
+    // Палец по пустому месту двигает доску (касание без движения снимает выделение, удержание — меню).
+    // Выделить несколько объектов пальцем — лассо на панели инструментов.
+    if (this.touchInput) {
+      this.startPan(p, true);
+      this.startLongPress(e);
+      return;
+    }
     // Левая кнопка по пустому месту — выделение рамкой (Shift — добавить к выделенному).
     // Доску двигают правой кнопкой, средней или пробелом.
     this.gesture = { kind: 'marquee', start: w, end: w, base: p.shift ? new Set(this.selection) : new Set() };
@@ -507,7 +555,103 @@ export class Editor {
     this.host.style.cursor = 'grabbing';
   }
 
+  // ---------- касания (iPad) ----------
+
+  /** Сдвиг, после которого нажатие становится перетаскиванием. */
+  private slop(): number {
+    return this.touchInput ? TOUCH_THRESHOLD : DRAG_THRESHOLD;
+  }
+
+  /** Расстояние между двумя пальцами и середина между ними — на экране доски. */
+  private pinchSpan(): { dist: number; x: number; y: number } {
+    const [a, b] = [...this.touches.values()];
+    return { dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  private movePinch(): void {
+    const pinch = this.pinch!;
+    const next = this.pinchSpan();
+    if (!pinch.moved && Math.abs(next.dist - pinch.dist) < TOUCH_THRESHOLD && Math.hypot(next.x - pinch.x, next.y - pinch.y) < TOUCH_THRESHOLD) return;
+    // Доска едет за серединой между пальцами и масштабируется вокруг неё — точка под пальцами остаётся под ними.
+    this.view.panBy(next.x - pinch.x, next.y - pinch.y);
+    this.view.zoomAt(next.x, next.y, next.dist / pinch.dist);
+    this.pinch = { ...next, at: pinch.at, moved: true };
+  }
+
+  private endPinch(time: number): void {
+    const pinch = this.pinch!;
+    this.pinch = null;
+    // Короткое касание двумя пальцами без движения — отменить, как в Procreate и Notes.
+    if (!pinch.moved && time - pinch.at < 300 && !this.readOnly) this.undo();
+  }
+
+  /** Бросить начатое одним пальцем (лёг второй палец): что уже сдвинули — остаётся одним шагом отмены. */
+  private abortGesture(): void {
+    const g = this.gesture;
+    this.gesture = null;
+    this.textOnUp = null;
+    this.cancelLongPress();
+    this.guides = [];
+    this.snapHits = [];
+    if (g && (g.kind === 'move' || g.kind === 'resize' || g.kind === 'endpoint' || g.kind === 'erase')) this.store.endGesture();
+    this.host.style.cursor = this.idleCursor();
+    this.changed();
+  }
+
+  private startLongPress(e: PointerEvent): void {
+    this.cancelLongPress();
+    if (this.readOnly) return;
+    const g = this.gesture;
+    const { clientX, clientY } = e;
+    this.longPress = window.setTimeout(() => {
+      this.longPress = 0;
+      if (this.gesture !== g || !this.pointer || this.touches.size !== 1) return;
+      this.gesture = null;
+      this.host.style.cursor = this.idleCursor();
+      const w = { x: this.pointer.wx, y: this.pointer.wy };
+      // Меню по объекту: если держали не выделенный — выделяем его, как правой кнопкой.
+      const hit = this.hitTest(w);
+      if (hit && !this.selection.has(hit)) this.select(this.unitOf(hit));
+      if (!hit && this.selection.size) this.select([]);
+      this.onContextMenu?.({ clientX, clientY, at: w, target: hit });
+    }, LONG_PRESS_MS);
+  }
+
+  private cancelLongPress(): void {
+    clearTimeout(this.longPress);
+    this.longPress = 0;
+  }
+
+  /** Касание без движения: доску не сдвинули и объект не потащили. */
+  private isTap(g: Gesture): boolean {
+    return (g.kind === 'pan' && !g.moved) || (g.kind === 'press' && !g.toggleOff);
+  }
+
+  /** Второе касание рядом с первым и вскоре после него — двойное касание. true — обработано. */
+  private doubleTap(p: PointerState): boolean {
+    const now = performance.now();
+    const prev = this.lastTap;
+    if (prev && now - prev.time < DOUBLE_TAP_MS && Math.hypot(p.sx - prev.x, p.sy - prev.y) < DOUBLE_TAP_PX) {
+      this.lastTap = null;
+      this.doubleTapAt = now;
+      this.doubleAt(p);
+      this.changed();
+      return true;
+    }
+    this.lastTap = { time: now, x: p.sx, y: p.sy };
+    return false;
+  }
+
   private onPointerMove(e: PointerEvent): void {
+    if (e.pointerType === 'touch' && this.touches.has(e.pointerId)) {
+      const r = this.host.getBoundingClientRect();
+      this.touches.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top });
+      if (this.pinch) {
+        this.perf.noteInput(e.timeStamp);
+        this.movePinch();
+        return;
+      }
+    } else if (e.pointerType === 'touch') return; // ладонь при рисовании пером или касание поля ввода
     this.pointer = this.readPointer(e);
     if (this.gesture) this.perf.noteInput(e.timeStamp);
     const g = this.gesture;
@@ -548,13 +692,17 @@ export class Editor {
         this.view.panBy(p.sx - g.lastX, p.sy - g.lastY);
         g.lastX = p.sx;
         g.lastY = p.sy;
-        if (Math.hypot(p.sx - g.downX, p.sy - g.downY) > DRAG_THRESHOLD) g.moved = true;
+        if (Math.hypot(p.sx - g.downX, p.sy - g.downY) > this.slop()) {
+          g.moved = true;
+          this.cancelLongPress();
+        }
         // Камера сдвинулась — точка доски под мышью теперь другая.
         this.pointer = { ...p, ...this.view.screenToWorld(p.sx, p.sy) } as PointerState;
         break;
       }
       case 'press': {
-        if (Math.hypot(p.sx - g.downX, p.sy - g.downY) < DRAG_THRESHOLD) break;
+        if (Math.hypot(p.sx - g.downX, p.sy - g.downY) < this.slop()) break;
+        this.cancelLongPress();
         if (g.toggleOff) break;
         this.startMove(g.start, g.alt);
         this.processMove(w, p.shift, p.ctrl);
@@ -618,6 +766,23 @@ export class Editor {
 
   private onPointerUp(e: PointerEvent): void {
     if (this.host.hasPointerCapture(e.pointerId)) this.host.releasePointerCapture(e.pointerId);
+    if (e.pointerType === 'pen') this.penDown = false;
+    if (e.pointerType === 'touch') {
+      if (!this.touches.delete(e.pointerId)) return;
+      this.cancelLongPress();
+      if (this.pinch) {
+        if (this.touches.size < 2) this.endPinch(e.timeStamp);
+        return;
+      }
+      if (this.textOnUp) {
+        // Поле ввода открывается в обработчике отпускания: только так iPad показывает клавиатуру.
+        const at = this.textOnUp;
+        this.textOnUp = null;
+        this.createTextAt(at);
+        this.setTool('select');
+        return;
+      }
+    }
     this.processPointer();
     const g = this.gesture;
     this.gesture = null;
@@ -628,6 +793,8 @@ export class Editor {
     if (g.kind === 'draw') g.predicted = [];
     const p = this.pointer ?? this.readPointer(e);
     const w = { x: p.wx, y: p.wy };
+
+    if (e.pointerType === 'touch' && this.isTap(g) && this.doubleTap(p)) return;
 
     switch (g.kind) {
       case 'pan':
@@ -703,8 +870,13 @@ export class Editor {
   }
 
   private onDoubleClick(e: MouseEvent): void {
-    if (this.readOnly || this.tool !== 'select' || (e.target as HTMLElement).closest('.text-edit')) return;
-    const p = this.readPointer(e);
+    if ((e.target as HTMLElement).closest('.text-edit') || performance.now() - this.doubleTapAt < 600) return;
+    this.doubleAt(this.readPointer(e));
+  }
+
+  /** Двойной щелчок или двойное касание: открыть объект, править его текст, по пустому месту — новый текст. */
+  private doubleAt(p: PointerState): void {
+    if (this.readOnly || this.tool !== 'select') return;
     const w = { x: p.wx, y: p.wy };
     const hit = this.hitTest(w);
     const item = hit ? this.store.get(hit) : undefined;
@@ -725,7 +897,7 @@ export class Editor {
   /** Самый верхний объект под точкой доски. Рамки ловятся только за заголовок, чтобы внутри них можно было двигать доску. */
   hitTest(w: Point, exclude?: string): string | null {
     const z = this.view.cam.zoom;
-    const tol = 6 / z;
+    const tol = (this.touchInput ? 12 : 6) / z;
     const candidates = this.view.search({ x: w.x - tol, y: w.y - tol, w: tol * 2, h: tol * 2 + 30 / z });
     candidates.sort((a, b) => this.store.indexOf(b.id) - this.store.indexOf(a.id));
     for (const item of candidates) {
@@ -875,7 +1047,8 @@ export class Editor {
   }
 
   private hitHandle(p: PointerState): Handle | null {
-    for (const h of this.handles()) if (Math.abs(p.sx - h.x) <= HANDLE && Math.abs(p.sy - h.y) <= HANDLE) return h.handle;
+    const reach = this.touchInput ? TOUCH_REACH : HANDLE;
+    for (const h of this.handles()) if (Math.abs(p.sx - h.x) <= reach && Math.abs(p.sy - h.y) <= reach) return h.handle;
     return null;
   }
 
@@ -897,7 +1070,7 @@ export class Editor {
   }
 
   private hitConnectDot(p: PointerState): { id: string; side: Side } | null {
-    for (const d of this.connectDots()) if (Math.hypot(p.sx - d.x, p.sy - d.y) <= 8) return d;
+    for (const d of this.connectDots()) if (Math.hypot(p.sx - d.x, p.sy - d.y) <= (this.touchInput ? TOUCH_REACH : 8)) return d;
     return null;
   }
 
@@ -914,7 +1087,7 @@ export class Editor {
   }
 
   private hitEndpoint(p: PointerState): { lineId: string; which: 'from' | 'to' } | null {
-    for (const e of this.lineEnds()) if (Math.hypot(p.sx - e.x, p.sy - e.y) <= 8) return e;
+    for (const e of this.lineEnds()) if (Math.hypot(p.sx - e.x, p.sy - e.y) <= (this.touchInput ? TOUCH_REACH : 8)) return e;
     return null;
   }
 

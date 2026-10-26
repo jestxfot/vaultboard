@@ -1,4 +1,4 @@
-# Релиз: на тег vX.Y.Z (его ставит npm run release) собираем установщики на Windows и Linux
+# Релиз: на тег vX.Y.Z (его ставит npm run release) собираем установщики на Windows и Linux и приложение для iPad
 # и выкладываем их в релиз GitHub — вместе с latest*.yml и .blockmap, по которым приложение обновляется само.
 # Запуск вручную (Actions → Релиз → Run workflow) только собирает, без релиза: проверить сборку и прогреть кэш.
 name: Релиз
@@ -50,8 +50,40 @@ jobs:
             release/latest*.yml
           if-no-files-found: error
 
+  # Приложение для iPad (Capacitor, см. capacitor.config.ts). Собирается без подписи: подписывает его при установке
+  # Sideloadly или AltStore своим Apple ID — так .ipa ставится без App Store и без платного аккаунта разработчика.
+  ipad:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx vite build
+      - run: npx cap sync ios
+      - name: Сборка .ipa без подписи
+        run: |
+          version=$(node -p "require('./package.json').version")
+          xcodebuild -version
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          mkdir -p release
+          zip -qry "release/vaultboard-$version-ipad.ipa" Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-ipad
+          path: release/*.ipa
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, ipad]
     # Релиз — только на тег; ручной запуск лишь собирает.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -77,6 +109,7 @@ jobs:
             echo
             echo
             echo "**Установка:** Windows — скачай \`vaultboard-setup-${TAG#v}.exe\` ниже и запусти. Linux — \`vaultboard-${TAG#v}-x86_64.AppImage\`."
+            echo "iPad — \`vaultboard-${TAG#v}-ipad.ipa\`: ставится с компьютера через Sideloadly или AltStore со своим Apple ID (как — в README)."
             echo 'У кого vaultboard уже стоит — новая версия скачается сама и поставится при выходе.'
           } > notes.md
           gh release create "$TAG" release/* --title "vaultboard $TAG" --notes-file notes.md

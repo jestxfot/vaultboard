@@ -698,3 +698,25 @@ kbd { font: 500 11.5px/1.4 "Segoe UI", system-ui, sans-serif; background: var(--
 .site-option .so-text { display: flex; flex-direction: column; min-width: 0; }
 .site-option .so-text b { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
 .site-option .so-text small { color: var(--muted); font-size: 12px; }
+
+/* ---------- касания (iPad) ---------- */
+/* Вырез и полоса состояния: на компьютере отступы нулевые. */
+#root { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; }
+/* Долгое нажатие — наше меню, а не системное «Скопировать / Выделить» и не лупа. */
+.app { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+.app input, .app textarea, .app [contenteditable], .app .cm-editor, .app .doc-read { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+@media (pointer: coarse) {
+  :root { font-size: 14px; }
+  .tool { width: 44px; height: 44px; }
+  .tool-menu { left: 60px; }
+  .swatch { width: 30px; height: 30px; }
+  .menu-item { padding-top: 10px; padding-bottom: 10px; }
+  .board { padding: 10px 8px; }
+  .icon-btn { padding: 9px 11px; font-size: 16px; }
+  .help-btn { width: 40px; height: 40px; }
+  .ctx-btn { min-width: 40px; min-height: 40px; }
+}
+/* Наведения нет — то, что мышь показывает при наведении, видно всегда. */
+@media (hover: none) {
+  .layer-actions, .cm-actions { display: flex; }
+}

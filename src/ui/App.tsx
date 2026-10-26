@@ -5,7 +5,8 @@ import { emptyBoard, parseBoard, serializeBoard } from '../format/board.ts';
 import { canvasFileRefs, importCanvas, parseCanvas } from '../format/canvasImport.ts';
 import { generateBoard } from '../bench/generate.ts';
 import { type PhaseResult, runAutopilot } from '../bench/autopilot.ts';
-import { type BoardEntry, SITE, vault } from '../io/vault.ts';
+import { type BoardEntry, LOCAL, SITE, vault } from '../io/vault.ts';
+import { LOCAL_ROOT_NAME } from '../io/localVault.ts';
 import { PublishDialog } from './PublishDialog.tsx';
 import { InviteDialog } from './InviteDialog.tsx';
 import { PresenceLayer } from './PresenceLayer.ts';
@@ -460,7 +461,8 @@ export function App() {
     );
     const base = (current() || 'доска').replace(/\/доска\.board$/i, '').split('/').pop()!.replace(/\.board$/i, '');
     const how = await saveBlob(result.blob, `${base}.${format}`);
-    if (how !== 'cancelled') flash(`Экспорт: ${result.width}×${result.height}, ${(result.blob.size / 1024 / 1024).toFixed(1)} МБ${how === 'downloaded' ? ' — в папке загрузок' : ''}`);
+    const where = typeof how === 'object' ? ` — в «Файлах»: ${LOCAL_ROOT_NAME} › ${how.device}` : how === 'downloaded' ? ' — в папке загрузок' : '';
+    if (how !== 'cancelled') flash(`Экспорт: ${result.width}×${result.height}, ${(result.blob.size / 1024 / 1024).toFixed(1)} МБ${where}`);
   }
 
   function styleSubmenu(): MenuEntry[] {
@@ -724,7 +726,7 @@ export function App() {
       { label: hideDone() ? 'Показать завершённые комментарии' : 'Скрыть завершённые комментарии', action: () => setHideDone(!hideDone()) },
       'sep',
       { label: 'Экспорт доски…', hint: 'PNG, JPG, PDF', action: () => openExport('board') },
-      { label: 'Опубликовать на сайт…', disabled: !opened?.session, action: () => setPublishing(true) },
+      ...(LOCAL ? [] : [{ label: 'Опубликовать на сайт…', disabled: !opened?.session, action: () => setPublishing(true) }]),
     ];
   }
 
@@ -1107,6 +1109,8 @@ export function App() {
     // Щелчок по доске мимо окна обсуждения закрывает его, как в Miro (булавки открывают своё сами).
     host.addEventListener('pointerdown', (e) => {
       if ((openThread() || draft()) && !(e.target as HTMLElement).closest('.comment-pin')) closeThread();
+      // Выехавшая панель досок прячется касанием доски (мыши для этого хватает ухода курсора).
+      if (peek()) setPeek(false);
     }, true);
     v.setDocs(docs, markdown);
     /** Гость по приглашению — откроем его доску; без приглашения (blocked) — ничего не открываем. */
@@ -1137,6 +1141,8 @@ export function App() {
       }
       void files.refresh().catch(() => undefined);
     } else {
+      // На iPad — узнать, где лежат файлы на устройстве (у сервера готовиться не к чему).
+      await vault.init().catch((err: Error) => setError(err.message));
       // Пришли по ссылке-приглашению: сервер запомнит приглашение, а ссылку уберём из адреса.
       const invite = new URLSearchParams(location.search).get('invite');
       if (invite) {
@@ -1191,8 +1197,18 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('beforeunload', onUnload);
+    // На iPad приложение не получает focus, когда к нему возвращаются (например, из «Файлов»), — только смену видимости.
+    // И закрывают его без beforeunload: ушло с экрана — сразу дописать доску, система может его выгрузить.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') onFocus();
+      else if (opened?.session?.hasUnsaved) void opened.session.save();
+    };
     window.addEventListener('focus', onFocus);
-    onCleanup(() => window.removeEventListener('focus', onFocus));
+    document.addEventListener('visibilitychange', onVisible);
+    onCleanup(() => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    });
     onCleanup(() => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('beforeunload', onUnload);
@@ -1240,7 +1256,7 @@ export function App() {
         onMouseLeave={() => collapsed() && setPeek(false)}
       >
         <div class="side-head">
-          <button class="side-brand" title={owner() ? 'Мастер настройки: папка с досками, имя' : 'vaultboard'} onClick={() => owner() && void openWizard()}>
+          <button class="side-brand" title={owner() && !LOCAL ? 'Мастер настройки: папка с досками, имя' : 'vaultboard'} onClick={() => owner() && !LOCAL && void openWizard()}>
             <span class="logo">vb</span>
             <span class="side-title">
               <b>
@@ -1345,7 +1361,7 @@ export function App() {
             <button class="icon-btn topbar-btn" title="Доски" onClick={() => setPeek(!peek())}>☰</button>
           </Show>
           <span class="title">{current() || 'Выбери доску слева'}</span>
-          <Show when={owner() && /\.board$/i.test(current())}>
+          <Show when={owner() && !LOCAL && /\.board$/i.test(current())}>
             <button class="topbar-publish" title="Пригласить на эту доску по ссылке: смотреть, комментировать или править вместе вживую" onClick={() => setInviting(true)}>
               {shared().has(current()) ? 'Общая · пригласить' : 'Пригласить'}
             </button>

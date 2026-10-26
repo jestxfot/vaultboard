@@ -10,6 +10,8 @@
 // длинный таймлайн выходит в той чёткости, которую выбрали. JPG браузер умеет сжимать только из холста —
 // для него предел остаётся.
 import type { Rect } from './geometry.ts';
+import { LOCAL } from '../io/vault.ts';
+import { saveToDevice } from '../io/localVault.ts';
 
 export type ExportFormat = 'png' | 'jpg' | 'pdf';
 
@@ -295,8 +297,12 @@ function pdfFromPacked(width: number, height: number, packed: Uint8Array[]): Blo
   return new Blob(parts as BlobPart[], { type: 'application/pdf' });
 }
 
-/** Сохранить файл: окно «Сохранить как» (если браузер умеет), иначе обычная загрузка. */
-export async function saveBlob(blob: Blob, name: string): Promise<'saved' | 'downloaded' | 'cancelled'> {
+/**
+ * Сохранить файл: окно «Сохранить как» (если браузер умеет), иначе обычная загрузка.
+ * На iPad загрузок нет — файл ложится в папку «Экспорт» рядом с досками (путь возвращается).
+ */
+export async function saveBlob(blob: Blob, name: string): Promise<'saved' | 'downloaded' | 'cancelled' | { device: string }> {
+  if (LOCAL) return { device: await saveToDevice(name, blob) };
   const picker = (window as unknown as { showSaveFilePicker?: (o: unknown) => Promise<FileSystemFileHandle> }).showSaveFilePicker;
   if (picker) {
     try {

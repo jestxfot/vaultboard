@@ -3,7 +3,7 @@
 // а обработчики вроде onerror выполнились бы внутри приложения.
 import MarkdownIt from 'markdown-it';
 import type { FileIndex } from '../io/files.ts';
-import { vault } from '../io/vault.ts';
+import { isVaultFileUrl, vault } from '../io/vault.ts';
 
 const IMAGE = /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i;
 
@@ -135,8 +135,8 @@ export function sanitize(html: string): string {
           !ALLOWED_ATTRS.has(name) ||
           (name === 'style' && /url\s*\(|expression|@import/.test(value)) ||
           (name === 'href' && !/^(https?:|mailto:|#)/.test(value)) ||
-          // Картинки — только файлы самой базы: у редактора с локального сервера, у сайта — опубликованные (f/…).
-          (name === 'src' && !value.startsWith('/api/file?') && !/^f\/[0-9a-f]{20}\.[a-z0-9]{1,8}$/.test(value));
+          // Картинки — только файлы самой базы: у редактора с локального сервера или iPad, у сайта — опубликованные (f/…).
+          (name === 'src' && !isVaultFileUrl(value) && !/^f\/[0-9a-f]{20}\.[a-z0-9]{1,8}$/.test(value));
         if (unsafe) child.removeAttribute(attr.name);
       }
       if (tag === 'a' && child.getAttribute('href')) child.setAttribute('target', '_blank');

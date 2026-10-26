@@ -1,7 +1,10 @@
-// Доступ к файлам базы из интерфейса. Два режима с одним и тем же набором функций:
+// Доступ к файлам базы из интерфейса. Три режима с одним и тем же набором функций:
 // - редактор — через локальный сервер (в настольной версии — прямой доступ к диску);
+// - приложение на iPad — файлы на самом устройстве, без сервера (localVault.ts);
 // - сайт (опубликованные доски, только просмотр) — готовые файлы рядом со страницей, по манифесту site.json.
-// Остальной код не знает, в каком он режиме, кроме мест, где прячется правка (см. SITE).
+// Остальной код не знает, в каком он режиме, кроме мест, где прячется правка (см. SITE) и то, чего нет на iPad (LOCAL).
+import { Capacitor } from '@capacitor/core';
+import { localFileUrlPrefix, localVault } from './localVault.ts';
 
 export interface BoardEntry {
   path: string;
@@ -251,6 +254,8 @@ const serverVault = {
   tunnel: (action: 'start' | 'stop' | 'download') => request<{ state: TunnelState }>('/api/tunnel', { method: 'POST', body: JSON.stringify({ action }) }),
 };
 
+export type Vault = typeof serverVault;
+
 export type GuestRole = 'view' | 'comment' | 'edit';
 
 export type GuestMe =
@@ -306,7 +311,7 @@ const readOnly = (): never => {
 /** Запрос, который на сайте никогда не ответит (долгие запросы редактора там не нужны). */
 const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
 
-const siteVault: typeof serverVault = {
+const siteVault: Vault = {
   async init() {
     const res = await fetch('site.json', { cache: 'no-cache' });
     if (!res.ok) throw new Error('Не удалось загрузить список досок сайта');
@@ -378,4 +383,16 @@ const siteVault: typeof serverVault = {
   tunnel: async () => readOnly(),
 };
 
-export const vault: typeof serverVault = SITE ? siteVault : serverVault;
+/**
+ * Приложение на iPad (Capacitor): доски на самом устройстве. При разработке тот же режим открывается в браузере
+ * адресом с ?local — файлы тогда лежат в хранилище браузера.
+ */
+export const LOCAL =
+  !SITE && typeof location !== 'undefined' && (Capacitor.isNativePlatform() || (!!import.meta.env?.DEV && new URLSearchParams(location.search).has('local')));
+
+export const vault: Vault = SITE ? siteVault : LOCAL ? localVault : serverVault;
+
+/** Адрес картинки — файл самой базы (у редактора с сервера, на iPad — с устройства). Сайт проверяет свои адреса сам. */
+export function isVaultFileUrl(url: string): boolean {
+  return url.startsWith(LOCAL ? localFileUrlPrefix().toLowerCase() : '/api/file?');
+}

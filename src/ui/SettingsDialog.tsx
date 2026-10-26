@@ -1,7 +1,7 @@
 // Настройки этого компьютера (не доски): папка с досками, имя в комментариях,
 // прокси, через который сервер ходит за карточками ссылок.
 import { createSignal, onMount, Show } from 'solid-js';
-import { vault } from '../io/vault.ts';
+import { LOCAL, vault } from '../io/vault.ts';
 import { FolderPicker } from './FolderPicker.tsx';
 import { chooseFolder, foreignRoot } from '../io/desktop.ts';
 
@@ -83,7 +83,9 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
               when={!fixedRoot()}
               fallback={
                 <div class="step-note">
-                  {fixedRoot()} — {foreignRoot ? 'папка этой доски: окно открыто для доски не из папки с досками' : 'задана переменной VAULT_ROOT при запуске сервера'}.
+                  {LOCAL
+                    ? `${fixedRoot()} — папка приложения в «Файлах». Чтобы перенести доски с компьютера, скопируй их папки сюда (через «Файлы», iCloud или кабелем — Apple Devices / Finder, «Общие файлы»).`
+                    : `${fixedRoot()} — ${foreignRoot ? 'папка этой доски: окно открыто для доски не из папки с досками' : 'задана переменной VAULT_ROOT при запуске сервера'}.`}
                 </div>
               }
             >
@@ -102,17 +104,20 @@ export function SettingsDialog(props: { onClose: () => void; onSaved?: (s: { aut
             <input class="setup-input" placeholder={defaultAuthor() || 'Имя'} value={author()} onInput={(e) => setAuthor(e.currentTarget.value)} />
           </section>
 
-          <section class="setup-step">
-            <div class="step-head small">Прокси для карточек ссылок</div>
-            <div class="step-note">
-              Страницу по ссылке читает сервер приложения, а не браузер. Если сайт открывается у тебя через прокси
-              (например ZeroOmega), укажи тот же адрес. Пусто — системный прокси, иначе напрямую.
-            </div>
-            <div class="settings-row">
-              <input class="setup-input" placeholder="http://127.0.0.1:10809 или socks5://127.0.0.1:10808" value={proxy()} onInput={(e) => setProxy(e.currentTarget.value)} />
-              <button class="soft-btn" onClick={() => void test()} disabled={busy()}>Проверить на Steam</button>
-            </div>
-          </section>
+          {/* На iPad страницу по ссылке скачивает само приложение — через системные настройки сети. */}
+          <Show when={!LOCAL}>
+            <section class="setup-step">
+              <div class="step-head small">Прокси для карточек ссылок</div>
+              <div class="step-note">
+                Страницу по ссылке читает сервер приложения, а не браузер. Если сайт открывается у тебя через прокси
+                (например ZeroOmega), укажи тот же адрес. Пусто — системный прокси, иначе напрямую.
+              </div>
+              <div class="settings-row">
+                <input class="setup-input" placeholder="http://127.0.0.1:10809 или socks5://127.0.0.1:10808" value={proxy()} onInput={(e) => setProxy(e.currentTarget.value)} />
+                <button class="soft-btn" onClick={() => void test()} disabled={busy()}>Проверить на Steam</button>
+              </div>
+            </section>
+          </Show>
 
           <Show when={status()}>
             <div class="step-note">{status()}</div>
